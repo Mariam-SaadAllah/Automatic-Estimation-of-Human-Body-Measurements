@@ -1,0 +1,19 @@
+# Ignore data files and CSVs (stored in Google Drive)
+data/
+*.csv
+
+# Ignore model checkpoints and logs (stored in Drive or generated during training)
+checkpoints/
+runs/
+*.pt
+*.pth
+
+# Ignore Python cache and system files
+__pycache__/
+*.py[cod]
+*.ipynb_checkpoints
+.DS_Store
+
+# Ignore virtual environment
+.venv/
+env/
