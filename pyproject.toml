@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bodym"
+version = "0.1.0"
+description = "Body measurements regression with MNASNet from binary silhouettes"
+readme = "README.md"
+authors = [{ name = "Your Name" }]
+requires-python = ">=3.10"
+dependencies = [
+  "torch>=2.2,<2.4",
+  "torchvision>=0.17,<0.19",
+  "pandas>=2.0,<3",
+  "numpy>=1.24,<3",
+  "pillow>=10",
+  "matplotlib>=3.7",
+  "tensorboard>=2.14",
+  "pyyaml>=6.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.black]
+line-length = 100
+
+[tool.ruff]
+line-length = 100
