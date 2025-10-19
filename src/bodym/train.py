@@ -14,7 +14,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 # === Import local modules (from your project) ===
 from bodym.data import BodyMDataset, build_samples
-from bodym.models import MNASNetRegressor
+from bodym.model import MNASNetRegressor
 from bodym.utils import RunConfig, seed_everything, save_run_config
 
 
@@ -279,3 +279,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
