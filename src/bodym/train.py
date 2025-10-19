@@ -18,7 +18,6 @@ from bodym.model import MNASNetRegressor
 from bodym.utils import RunConfig, seed_everything, save_run_config
 
 
-# -------------------- Utility functions --------------------
 def reduce_lr_by_factor(optimizer: torch.optim.Optimizer, factor: float = 0.1):
     """Multiply LR of every param group by `factor`."""
     new_lrs = []
@@ -56,18 +55,12 @@ def evaluate_subjectwise_model(
     eval_ds = BodyMDataset(sample_list)
     eval_loader = DataLoader(eval_ds, batch_size=batch_size, shuffle=False, num_workers=num_workers)
 
-    for x, y, sid, meta in eval_loader:
+    for x, y, sid in eval_loader:
         x, y = x.to(device), y.to(device)
         preds = model(x)
         abs_err = (preds - y).abs().detach().cpu().numpy()  # shape [B, 14]
 
-        sids = sid
-        if subject_map is not None and "photo_id" in meta:
-            photo_ids = meta["photo_id"]
-            mapped = [subject_map.get(pid, sid_i) for pid, sid_i in zip(photo_ids, sids)]
-            sids = mapped
-
-        for err_vec, subject_id in zip(abs_err, sids):
+        for err_vec, subject_id in zip(abs_err, sid):
             subj_errs.setdefault(str(subject_id), []).append(err_vec)
 
     subj_maes = [np.mean(np.stack(v, axis=0), axis=0) for v in subj_errs.values()]
@@ -100,7 +93,6 @@ def read_subject_map_csv(csv_path: Path) -> Dict[str, str]:
     return mapping
 
 
-# -------------------- Main training function --------------------
 def main():
     parser = argparse.ArgumentParser("MNASNet Body Measurement Training (Frozen Backbone)")
     parser.add_argument("--data_root", type=str, required=True)
@@ -129,7 +121,6 @@ def main():
 
     args = parser.parse_args()
 
-    # Setup
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     seed_everything(args.seed)
 
@@ -145,14 +136,13 @@ def main():
     # Model
     model = MNASNetRegressor(num_outputs=14, weights=args.weights).to(device)
 
-    # Freeze backbone completely
+    # Freeze backbone permanently
     backbone_params, head_params = group_params(model)
     for p in backbone_params:
         p.requires_grad = False
     for p in head_params:
         p.requires_grad = True
 
-    # Optimizer (only head parameters)
     optimizer = torch.optim.AdamW(
         filter(lambda p: p.requires_grad, model.parameters()),
         lr=args.lr,
@@ -160,7 +150,7 @@ def main():
     )
 
     scaler = GradScaler(enabled=(device.type == "cuda"))
-    criterion = nn.L1Loss(reduction="mean")  # MAE loss
+    criterion = nn.L1Loss(reduction="mean")
 
     writer = SummaryWriter(args.out_dir)
     os.makedirs(args.out_dir, exist_ok=True)
@@ -178,7 +168,7 @@ def main():
         batch_size=args.batch_size,
         learning_rate=args.lr,
         seed=args.seed,
-         max_iters=max_iters,
+        max_iters=max_iters,
         reduce_iters=reduce_iters,
         out_dir=args.out_dir,
         checkpoint_dir=args.checkpoint_dir
@@ -187,7 +177,7 @@ def main():
 
     subject_map = read_subject_map_csv(Path(args.subject_map_csv)) if args.subject_map_csv else None
 
-    # ---------------- Evaluation-only mode ----------------
+    # Eval only
     if args.eval_only:
         if args.eval_model_path:
             sd = torch.load(args.eval_model_path, map_location="cpu")
@@ -202,7 +192,7 @@ def main():
         print(f"TP50: {tp['TP50']:.3f}  TP75: {tp['TP75']:.3f}  TP90: {tp['TP90']:.3f}\n")
         return
 
-    # ---------------- Training ----------------
+    # Training
     iteration = 0
     epoch = 0
     best_overall = float("inf")
@@ -212,7 +202,7 @@ def main():
         running_loss = 0.0
         batch_count = 0
 
-        for x, y, sid, _meta in loader:
+        for x, y, sid in loader:
             if iteration >= max_iters:
                 break
 
@@ -231,7 +221,6 @@ def main():
             batch_count += 1
             iteration += 1
 
-            # LR reductions at milestones
             if iteration in reduce_iters:
                 new_lrs = reduce_lr_by_factor(optimizer, factor=0.1)
                 writer.add_scalar("train/lr", new_lrs[0], global_step=iteration)
@@ -240,7 +229,6 @@ def main():
         avg_train_loss = running_loss / max(1, batch_count)
         writer.add_scalar("train/loss_mae_mm", avg_train_loss, global_step=iteration)
 
-        # Validation
         if epoch % args.eval_every == 0:
             eval_subset = random.sample(samples, k=min(256, len(samples))) if len(samples) > 1000 else samples
             per_m_mae, overall_mae, tp = evaluate_subjectwise_model(
@@ -277,4 +265,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
