@@ -173,19 +173,17 @@ def main():
     run_cfg = RunConfig(
         data_root=args.data_root,
         split=args.split,
-        h=args.single_h,
-        w=args.single_w,
+        single_h=args.single_h,
+        single_w=args.single_w,
         batch_size=args.batch_size,
-        lr=args.lr,
-        weight_decay=args.weight_decay,
+        learning_rate=args.lr,
         seed=args.seed,
-        max_iters=max_iters,
+         max_iters=max_iters,
         reduce_iters=reduce_iters,
-        weights=args.weights,
         out_dir=args.out_dir,
         checkpoint_dir=args.checkpoint_dir
     )
-    save_run_config(args.out_dir, run_cfg)
+    save_run_config(run_cfg, args.out_dir)
 
     subject_map = read_subject_map_csv(Path(args.subject_map_csv)) if args.subject_map_csv else None
 
