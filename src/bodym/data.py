@@ -10,6 +10,24 @@ import torch
 from PIL import Image
 from torch.utils.data import Dataset
 
+# Precomputed normalization constants (from BodyM training split)
+# --------------------------------------------------------------------
+# Replace the placeholder values with the actual min/max you compute once
+HEIGHT_MIN_CM = 152.3
+HEIGHT_MAX_CM = 197.5
+WEIGHT_MIN_KG = 46.1
+WEIGHT_MAX_KG = 108.2
+
+# Per-measurement min and max values (in millimeters)
+Y_MIN_MM = np.array([
+    148.5, 398.2, 204.3, 252.1, 692.7, 211.6, 711.2, 702.9,
+    306.4, 703.2, 354.7, 602.5, 151.4, 1512.3
+], dtype=np.float32)
+Y_MAX_MM = np.array([
+    250.1, 802.8, 405.9, 452.3, 1198.4, 403.1, 1102.0, 1199.7,
+    502.5, 1203.9, 604.8, 999.6, 249.1, 2001.8
+], dtype=np.float32)
+
 # List of measurement column names as provided by the dataset (in centimeters).
 MEASUREMENT_COLS: list[str] = [
     "ankle",
@@ -83,9 +101,9 @@ def build_samples(split_dir: Path) -> Tuple[list[dict[str, Any]], float, float, 
         # Raw height and weight.
         height_cm = float(hw["height_cm"])
         weight_kg = float(hw["weight_kg"])
-        # Normalize height and weight to [0,1] using dataset min/max.
-        height_norm = (height_cm - h_min) / (h_max - h_min) if (h_max > h_min) else 0.0
-        weight_norm = (weight_kg - w_min) / (w_max - w_min) if (w_max > w_min) else 0.0
+        # Normalize height and weight using precomputed BodyM training statistics
+        height_norm = (height_cm - HEIGHT_MIN_CM) / (HEIGHT_MAX_CM - HEIGHT_MIN_CM)
+        weight_norm = (weight_kg - WEIGHT_MIN_KG) / (WEIGHT_MAX_KG - WEIGHT_MIN_KG)
 
         # Collect measurement targets in cm for this subject.
         y_cm = [float(meas_row[c]) for c in MEASUREMENT_COLS]
@@ -158,10 +176,17 @@ class BodyMDataset(Dataset):
         # Convert to torch.Tensor.
         x = torch.from_numpy(stacked).float()
 
-        # Prepare target measurements in millimeters.
-        y_cm = np.array(s["y_cm"], dtype=np.float32)      # 14 measurements in cm
-        y_mm = torch.from_numpy(y_cm * 10.0).float()      # convert to millimeters
+        # Prepare target measurements in millimeters and normalize to [-1, +1]
+        y_cm = np.array(s["y_cm"], dtype=np.float32)
+        y_mm = y_cm * 10.0  # convert cm → mm
+        y_mm = np.clip(y_mm, Y_MIN_MM, Y_MAX_MM)  # clamp within BodyM range
 
+        # Normalize to [-1, +1] using BodyM training min/max
+        y_norm = 2.0 * (y_mm - Y_MIN_MM) / (Y_MAX_MM - Y_MIN_MM) - 1.0
+
+        y_tensor = torch.from_numpy(y_norm).float()
         subject_id = s["subject_id"]
-        return x, y_mm, subject_id
+        return x, y_tensor, subject_id
+
+
 
