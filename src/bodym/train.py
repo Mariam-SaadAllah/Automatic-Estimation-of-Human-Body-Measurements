@@ -82,7 +82,7 @@ def main() -> None:
 
     # Prepare dataset samples
     split_dir = Path(args.data_root) / args.split
-    samples, h_min, h_max, w_min, w_max = build_samples(split_dir)
+    samples = build_samples(split_dir)
 
     # ---------------- SUBJECT-BASED 90/10 TRAIN-VALIDATION SPLIT ----------------
     if args.split == "train":
@@ -226,4 +226,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
