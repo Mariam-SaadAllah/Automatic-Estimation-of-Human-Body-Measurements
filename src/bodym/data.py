@@ -122,7 +122,7 @@ def build_samples(split_dir: Path) -> Tuple[list[dict[str, Any]], float, float, 
             "y": y_cm,  # alias (the model will predict mm, see below)
         })
 
-    return samples, float(h_min), float(h_max), float(w_min), float(w_max)
+    return samples
 
 
 class BodyMDataset(Dataset):
@@ -187,6 +187,7 @@ class BodyMDataset(Dataset):
         y_tensor = torch.from_numpy(y_norm).float()
         subject_id = s["subject_id"]
         return x, y_tensor, subject_id
+
 
 
 
