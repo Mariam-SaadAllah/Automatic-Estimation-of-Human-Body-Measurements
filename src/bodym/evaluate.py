@@ -96,8 +96,9 @@ def main() -> None:
         model.load_state_dict(checkpoint)  # if loading state dict directly
 
     # Build samples for test sets A and B
-    testA_samples, *_ = build_samples(Path(args.data_root) / args.splitA)
-    testB_samples, *_ = build_samples(Path(args.data_root) / args.splitB)
+    testA_samples = build_samples(Path(args.data_root) / args.splitA)
+    testB_samples = build_samples(Path(args.data_root) / args.splitB)
+
 
     # Evaluate subject-wise (each subject's mean error)
     overallA_mm, tpA = evaluate_subjectwise_mm(model, testA_samples, device)
@@ -122,4 +123,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
