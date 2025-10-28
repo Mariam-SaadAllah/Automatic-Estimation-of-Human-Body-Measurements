@@ -14,6 +14,7 @@ from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 
 from bodym.data import BodyMDataset, build_samples
+from bodym.data import Y_MIN_MM, Y_MAX_MM
 from bodym.model import MNASNetRegressor
 from bodym.utils import RunConfig, seed_everything, save_run_config
 
@@ -39,7 +40,12 @@ def evaluate_subjectwise_model(model: nn.Module, sample_list: list[dict], device
                 x = x.to(device)
                 y = y.to(device)
                 pred = model(x)
-                err = torch.abs(pred - y).cpu().numpy()[0]
+                # Unnormalize model outputs and targets back to millimeters
+                pred_mm = (pred + 1) / 2 * (torch.from_numpy(Y_MAX_MM).to(device) - torch.from_numpy(Y_MIN_MM).to(device)) + torch.from_numpy(Y_MIN_MM).to(device)
+                y_mm = (y + 1) / 2 * (torch.from_numpy(Y_MAX_MM).to(device) - torch.from_numpy(Y_MIN_MM).to(device)) + torch.from_numpy(Y_MIN_MM).to(device)
+
+                # Compute absolute error in millimeters
+                err = torch.abs(pred_mm - y_mm).cpu().numpy()[0]
                 maes_by_subject.setdefault(sid[0], []).append(err)
     subj_maes = np.array([np.mean(errors, axis=0) for errors in maes_by_subject.values()])
     per_measurement_mae = subj_maes.mean(axis=0)
@@ -220,3 +226,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
