@@ -8,6 +8,7 @@ import torch
 from torch.utils.data import DataLoader
 
 from bodym.data import BodyMDataset, build_samples
+from bodym.data import Y_MIN_MM, Y_MAX_MM
 from bodym.model import MNASNetRegressor
 
 def evaluate_subjectwise_mm(model: torch.nn.Module, samples: list[dict], device: str):
@@ -25,7 +26,12 @@ def evaluate_subjectwise_mm(model: torch.nn.Module, samples: list[dict], device:
                 x = x.to(device)
                 y = y.to(device)
                 pred = model(x)
-                err = torch.abs(pred - y).cpu().numpy()[0]  # absolute errors (14,)
+                # Unnormalize predictions and ground-truths back to millimeters
+                pred_mm = (pred + 1) / 2 * (torch.from_numpy(Y_MAX_MM).to(device) - torch.from_numpy(Y_MIN_MM).to(device)) + torch.from_numpy(Y_MIN_MM).to(device)
+                y_mm = (y + 1) / 2 * (torch.from_numpy(Y_MAX_MM).to(device) - torch.from_numpy(Y_MIN_MM).to(device)) + torch.from_numpy(Y_MIN_MM).to(device)
+
+                # Compute absolute errors in millimeters
+                err = torch.abs(pred_mm - y_mm).cpu().numpy()[0]
                 maes_by_subject.setdefault(sid[0], []).append(err)
     # Compute mean error per subject (average across multiple images of same subject if any)
     subj_maes = np.array([np.mean(v, axis=0) for v in maes_by_subject.values()])
@@ -52,8 +58,12 @@ def evaluate_table_mm(model: torch.nn.Module, dataloader: DataLoader):
             imgs = imgs.to(device)
             ys = ys.to(device)
             outputs = model(imgs)
-            all_preds.append(outputs.cpu().numpy())
-            all_targets.append(ys.cpu().numpy())
+            # Unnormalize both outputs and targets to millimeters
+            pred_mm = (outputs + 1) / 2 * (torch.from_numpy(Y_MAX_MM).to(device) - torch.from_numpy(Y_MIN_MM).to(device)) + torch.from_numpy(Y_MIN_MM).to(device)
+            ys_mm = (ys + 1) / 2 * (torch.from_numpy(Y_MAX_MM).to(device) - torch.from_numpy(Y_MIN_MM).to(device)) + torch.from_numpy(Y_MIN_MM).to(device)
+
+            all_preds.append(pred_mm.cpu().numpy())
+            all_targets.append(ys_mm.cpu().numpy())
     preds = np.concatenate(all_preds, axis=0)
     targets = np.concatenate(all_targets, axis=0)
     abs_errors = np.abs(preds - targets)  # shape: (N, 14)
@@ -112,3 +122,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
