@@ -25,11 +25,14 @@ class MNASNetRegressor(nn.Module):
             nn.Linear(num_features, 128),
             nn.ReLU(),
             nn.Linear(128, num_outputs),
+            nn.Tanh(),  # ensure outputs are in [-1, +1]
         )
+
         self.model = mnas
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.model(x)
+
 
 
 
