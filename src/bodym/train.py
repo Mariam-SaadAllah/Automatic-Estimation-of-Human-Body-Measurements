@@ -245,10 +245,16 @@ def main() -> None:
               f"Accuracy@10mm: {acc_10mm:.2f}%  "
               f"TPs: {tp}")
 
-        # short preview of per-measurement MAEs
-        head = min(5, len(MEASUREMENT_COLS))
-        short_rows = ', '.join([f'{n}:{m:.1f}mm' for n, m in zip(MEASUREMENT_COLS[:head], per_meas_mae[:head])])
-        print(f"Val per-measurement (first {head}): {short_rows}")
+        # Print per-epoch summary line (always)
+        print(f"Epoch {epoch+1}/{num_epochs}  Iter {iteration}  Train loss: {avg_train_loss:.6f}  "
+              f"Val overall MAE (mm): {overall_mae:.3f}  Accuracy@10mm: {acc_10mm:.2f}%  TPs: {tp}")
+
+        # Print the full 14-measurement MAE table every 5 epochs
+        if (epoch + 1) % 5 == 0:
+            print("\nFull per-measurement MAE (mm):")
+            for name, mae in zip(MEASUREMENT_COLS, per_meas_mae):
+                print(f"  {name:>20s}: {mae:7.2f} mm")
+            print()  # blank line for readability
 
         ckpt = {
             "epoch": epoch + 1,
@@ -271,3 +277,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
