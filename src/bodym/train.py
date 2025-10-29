@@ -18,6 +18,21 @@ from bodym.data import Y_MIN_MM, Y_MAX_MM
 from bodym.model import MNASNetRegressor
 from bodym.utils import RunConfig, seed_everything, save_run_config
 
+# ---------------------------------------------------------------------
+# NEW: Helper function for accuracy
+# ---------------------------------------------------------------------
+def compute_accuracy_mm(errors: np.ndarray, threshold_mm: float = 10.0) -> float:
+    """
+    Compute percentage of measurements whose absolute error is <= threshold_mm.
+    Args:
+        errors: numpy array of absolute errors (subjects × 14)
+        threshold_mm: tolerance in millimeters
+    Returns:
+        Accuracy percentage [0,100]
+    """
+    within = (errors <= threshold_mm).astype(np.float32)
+    return 100.0 * within.mean()
+# ---------------------------------------------------------------------
 
 def reduce_lr_by_factor(opt: torch.optim.Optimizer, factor: float = 0.1) -> None:
     """Scale down the learning rate of each parameter group by the given factor."""
@@ -25,10 +40,13 @@ def reduce_lr_by_factor(opt: torch.optim.Optimizer, factor: float = 0.1) -> None
         pg["lr"] *= factor
 
 
-def evaluate_subjectwise_model(model: nn.Module, sample_list: list[dict], device: str) -> tuple[np.ndarray, float, dict[str, float]]:
+# ---------------------------------------------------------------------
+# UPDATED: Now returns accuracy_10mm as well
+# ---------------------------------------------------------------------
+def evaluate_subjectwise_model(model: nn.Module, sample_list: list[dict], device: str) -> tuple[np.ndarray, float, dict[str, float], float]:
     """
     Evaluate the model on a list of samples (dictionaries) and compute MAE per measurement for each subject.
-    Returns (per_measurement_mae, overall_mae, tp_dict) where tp_dict contains mean TP50, TP75, TP90 across measurements.
+    Returns (per_measurement_mae, overall_mae, tp_dict, accuracy_10mm)
     """
     model.eval()
     maes_by_subject: dict[str, list[np.ndarray]] = {}
@@ -55,7 +73,12 @@ def evaluate_subjectwise_model(model: nn.Module, sample_list: list[dict], device
         "TP75": float(np.quantile(subj_maes, q=0.75, axis=0).mean()),
         "TP90": float(np.quantile(subj_maes, q=0.90, axis=0).mean()),
     }
-    return per_measurement_mae, overall_mae, tp
+
+    # NEW: compute accuracy within ±10 mm
+    accuracy_10mm = compute_accuracy_mm(subj_maes, threshold_mm=10.0)
+
+    return per_measurement_mae, overall_mae, tp, accuracy_10mm
+# ---------------------------------------------------------------------
 
 
 def main() -> None:
@@ -156,8 +179,8 @@ def main() -> None:
     args.checkpoint_dir.mkdir(exist_ok=True, parents=True)
 
     if args.eval_only:
-        _, overall_mae, tp = evaluate_subjectwise_model(model, val_samples, device)
-        print(f"Eval-only: overall MAE (mm): {overall_mae:.3f}  TPs: {tp}")
+        _, overall_mae, tp, acc_10mm = evaluate_subjectwise_model(model, val_samples, device)
+        print(f"Eval-only: overall MAE (mm): {overall_mae:.3f}  Accuracy@10mm: {acc_10mm:.2f}%  TPs: {tp}")
         return
 
     # ---------------- TRAINING LOOP ----------------
@@ -199,11 +222,33 @@ def main() -> None:
         else:
             val_subset = val_samples
 
-        _, overall_mae, tp = evaluate_subjectwise_model(model, val_subset, device)
+        # UPDATED VALIDATION BLOCK
+        per_meas_mae, overall_mae, tp, acc_10mm = evaluate_subjectwise_model(model, val_subset, device)
+
+        # --- Log metrics to TensorBoard ---
         writer.add_scalar("val/overall_mae_mm", overall_mae, epoch)
+        writer.add_scalar("val/accuracy_10mm", acc_10mm, epoch)
+        writer.add_scalar("val/TP50_mm", tp["TP50"], epoch)
+        writer.add_scalar("val/TP75_mm", tp["TP75"], epoch)
+        writer.add_scalar("val/TP90_mm", tp["TP90"], epoch)
         writer.add_text("val/TP", str(tp), epoch)
-        print(f"Epoch {epoch+1}/{num_epochs}  Iter {iteration}  Train loss: {avg_train_loss:.6f}  "
-              f"Val overall MAE (mm): {overall_mae:.3f}  TPs: {tp}")
+
+        # --- Optional per-measurement logging ---
+        from bodym.data import MEASUREMENT_COLS
+        for name, mae in zip(MEASUREMENT_COLS, per_meas_mae):
+            writer.add_scalar(f"val/mae_{name}_mm", mae, epoch)
+
+        # --- Console summary ---
+        print(f"Epoch {epoch+1}/{num_epochs}  Iter {iteration}  "
+              f"Train loss: {avg_train_loss:.6f}  "
+              f"Val overall MAE (mm): {overall_mae:.3f}  "
+              f"Accuracy@10mm: {acc_10mm:.2f}%  "
+              f"TPs: {tp}")
+
+        # short preview of per-measurement MAEs
+        head = min(5, len(MEASUREMENT_COLS))
+        short_rows = ', '.join([f'{n}:{m:.1f}mm' for n, m in zip(MEASUREMENT_COLS[:head], per_meas_mae[:head])])
+        print(f"Val per-measurement (first {head}): {short_rows}")
 
         ckpt = {
             "epoch": epoch + 1,
@@ -226,5 +271,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
-
