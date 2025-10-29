@@ -15,6 +15,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 from bodym.data import BodyMDataset, build_samples
 from bodym.data import Y_MIN_MM, Y_MAX_MM
+from bodym.data import MEASUREMENT_COLS
 from bodym.model import MNASNetRegressor
 from bodym.utils import RunConfig, seed_everything, save_run_config
 
@@ -234,16 +235,9 @@ def main() -> None:
         writer.add_text("val/TP", str(tp), epoch)
 
         # --- Optional per-measurement logging ---
-        from bodym.data import MEASUREMENT_COLS
+        
         for name, mae in zip(MEASUREMENT_COLS, per_meas_mae):
             writer.add_scalar(f"val/mae_{name}_mm", mae, epoch)
-
-        # --- Console summary ---
-        print(f"Epoch {epoch+1}/{num_epochs}  Iter {iteration}  "
-              f"Train loss: {avg_train_loss:.6f}  "
-              f"Val overall MAE (mm): {overall_mae:.3f}  "
-              f"Accuracy@10mm: {acc_10mm:.2f}%  "
-              f"TPs: {tp}")
 
         # Print per-epoch summary line (always)
         print(f"Epoch {epoch+1}/{num_epochs}  Iter {iteration}  Train loss: {avg_train_loss:.6f}  "
@@ -277,4 +271,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
