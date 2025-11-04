@@ -19,8 +19,9 @@ from bodym.data import MEASUREMENT_COLS
 from bodym.model import MNASNetRegressor
 from bodym.utils import RunConfig, seed_everything, save_run_config
 
+
 # ---------------------------------------------------------------------
-# Helper: accuracy computation
+# Helper for computing accuracy in millimeters
 # ---------------------------------------------------------------------
 def compute_accuracy_mm(errors: np.ndarray, threshold_mm: float = 10.0) -> float:
     within = (errors <= threshold_mm).astype(np.float32)
@@ -28,14 +29,16 @@ def compute_accuracy_mm(errors: np.ndarray, threshold_mm: float = 10.0) -> float
 
 
 def reduce_lr_by_factor(opt: torch.optim.Optimizer, factor: float = 0.1) -> None:
+    """Scale down the learning rate of each parameter group by the given factor."""
     for pg in opt.param_groups:
         pg["lr"] *= factor
 
 
 # ---------------------------------------------------------------------
-# Validation routine (unchanged except prints Accuracy@10mm)
+# Evaluation helper
 # ---------------------------------------------------------------------
 def evaluate_subjectwise_model(model: nn.Module, sample_list: list[dict], device: str):
+    """Evaluate the model and compute per-measurement & overall MAE."""
     model.eval()
     maes_by_subject: dict[str, list[np.ndarray]] = {}
     with torch.no_grad():
@@ -46,6 +49,7 @@ def evaluate_subjectwise_model(model: nn.Module, sample_list: list[dict], device
                 x = x.to(device)
                 y = y.to(device)
                 pred = model(x)
+                # Convert back to mm
                 pred_mm = (pred + 1) / 2 * (
                     torch.from_numpy(Y_MAX_MM).to(device) - torch.from_numpy(Y_MIN_MM).to(device)
                 ) + torch.from_numpy(Y_MIN_MM).to(device)
@@ -54,6 +58,7 @@ def evaluate_subjectwise_model(model: nn.Module, sample_list: list[dict], device
                 ) + torch.from_numpy(Y_MIN_MM).to(device)
                 err = torch.abs(pred_mm - y_mm).cpu().numpy()[0]
                 maes_by_subject.setdefault(sid[0], []).append(err)
+
     subj_maes = np.array([np.mean(errors, axis=0) for errors in maes_by_subject.values()])
     per_measurement_mae = subj_maes.mean(axis=0)
     overall_mae = float(per_measurement_mae.mean())
@@ -67,33 +72,35 @@ def evaluate_subjectwise_model(model: nn.Module, sample_list: list[dict], device
 
 
 # ---------------------------------------------------------------------
-# MAIN TRAINING SCRIPT
+# MAIN
 # ---------------------------------------------------------------------
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Train BodyM MNASNet Regressor (unfrozen, two learning rates).")
+    parser = argparse.ArgumentParser(description="Train BodyM MNASNet Regressor model.")
     parser.add_argument("--data_root", type=Path, required=True)
     parser.add_argument("--split", type=str, default="train")
     parser.add_argument("--batch_size", type=int, default=22)
     parser.add_argument("--single_h", type=int, default=640)
     parser.add_argument("--single_w", type=int, default=480)
     parser.add_argument("--max_iters", type=int, default=150_000)
-    parser.add_argument("--lr_backbone", type=float, default=1e-5, help="Learning rate for backbone.")
-    parser.add_argument("--lr_head", type=float, default=1e-4, help="Learning rate for FC head.")
+    parser.add_argument("--lr", type=float, default=1e-3, help="Global learning rate (used if no separate LR specified)")
+    parser.add_argument("--lr_backbone", type=float, default=None, help="Learning rate for backbone (optional)")
+    parser.add_argument("--lr_head", type=float, default=None, help="Learning rate for FC head (optional)")
     parser.add_argument("--num_workers", type=int, default=2)
-    parser.add_argument("--out_dir", type=Path, default=Path("runs/bmnet_mnas_scratch"))
-    parser.add_argument("--checkpoint_dir", type=Path, default=Path("checkpoints_scratch"))
+    parser.add_argument("--out_dir", type=Path, default=Path("runs/bmnet_mnas_pretrained"))
+    parser.add_argument("--checkpoint_dir", type=Path, default=Path("checkpoints"))
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--weights", type=str, default="IMAGENET1K_V1",
-                        choices=["IMAGENET1K_V1", "DEFAULT", "NONE"])
+    parser.add_argument("--weights", type=str, default="IMAGENET1K_V1", choices=["IMAGENET1K_V1", "DEFAULT", "NONE"])
     parser.add_argument("--eval_only", action="store_true")
+    parser.add_argument("--freeze_backbone", action="store_true")
     args = parser.parse_args()
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     seed_everything(args.seed)
 
-    # -------------------- DATASET --------------------
+    # ---------------- DATASET ----------------
     split_dir = Path(args.data_root) / args.split
     samples = build_samples(split_dir)
+
     if args.split == "train":
         subject_to_samples = collections.defaultdict(list)
         for s in samples:
@@ -111,27 +118,59 @@ def main() -> None:
     dataset = BodyMDataset(train_samples, single_h=args.single_h, single_w=args.single_w)
     loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers)
 
-    # -------------------- MODEL --------------------
+    # ---------------- MODEL ----------------
     model = MNASNetRegressor(num_outputs=14, weights=None if args.weights == "NONE" else args.weights)
     model = model.to(device)
 
-    # Count trainable parameters
+    # Print parameter count
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Total parameters: {total_params:,}")
     print(f"Trainable parameters: {trainable_params:,}")
 
-    # -------------------- OPTIMIZER (two LR groups) --------------------
-    # Expecting model.backbone and model.fc attributes
-    backbone_params = model.backbone.parameters() if hasattr(model, "backbone") else model.features.parameters()
-    head_params = model.fc.parameters() if hasattr(model, "fc") else model.classifier.parameters()
-    optimizer = torch.optim.AdamW([
-        {"params": backbone_params, "lr": args.lr_backbone},
-        {"params": head_params, "lr": args.lr_head},
-    ], weight_decay=1e-4)
+    # Freeze backbone if requested
+    if args.freeze_backbone:
+        for name, param in model.named_parameters():
+            if "classifier" not in name:
+                param.requires_grad = False
+        print(" Backbone layers frozen — only regression head will be trained.")
+
+    # ---------------- OPTIMIZER ----------------
+    if args.lr_backbone is not None and args.lr_head is not None:
+        print(f"⚙️  Using separate learning rates: backbone={args.lr_backbone}, head={args.lr_head}")
+
+        # Auto-detect parameter groups
+        if hasattr(model, "backbone"):
+            backbone_params = model.backbone.parameters()
+        elif hasattr(model, "features"):
+            backbone_params = model.features.parameters()
+        elif hasattr(model, "mnasnet"):
+            backbone_params = model.mnasnet.parameters()
+        else:
+            print("  Could not detect named backbone, using all parameters as backbone.")
+            backbone_params = model.parameters()
+
+        if hasattr(model, "fc"):
+            head_params = model.fc.parameters()
+        elif hasattr(model, "classifier"):
+            head_params = model.classifier.parameters()
+        elif hasattr(model, "regressor"):
+            head_params = model.regressor.parameters()
+        else:
+            print("  Could not detect named head, using all parameters as head.")
+            head_params = model.parameters()
+
+        optimizer = torch.optim.AdamW([
+            {"params": backbone_params, "lr": args.lr_backbone},
+            {"params": head_params, "lr": args.lr_head},
+        ], weight_decay=1e-4)
+
+    else:
+        optimizer = torch.optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=args.lr, weight_decay=1e-4)
+
     criterion = nn.L1Loss()
 
-    # -------------------- LOGGING SETUP --------------------
+    # ---------------- TRAINING SETUP ----------------
     writer = SummaryWriter(log_dir=str(args.out_dir))
     train_size = len(loader.dataset)
     iters_per_epoch = math.ceil(train_size / args.batch_size)
@@ -147,7 +186,7 @@ def main() -> None:
         single_w=args.single_w,
         max_iters=args.max_iters,
         reduce_iters=tuple(reduce_iters),
-        learning_rate=args.lr_head,
+        learning_rate=args.lr,
         num_workers=args.num_workers,
         out_dir=args.out_dir,
         checkpoint_dir=args.checkpoint_dir,
@@ -160,15 +199,15 @@ def main() -> None:
     best_val = float("inf")
     args.checkpoint_dir.mkdir(exist_ok=True, parents=True)
 
-    # -------------------- TRAINING LOOP --------------------
+    # ---------------- TRAINING LOOP ----------------
     for epoch in range(num_epochs):
         model.train()
         running_loss = 0.0
         batch_count = 0
+
         for x_batch, y_batch, _ in loader:
             x_batch = x_batch.to(device)
             y_batch = y_batch.to(device)
-
             optimizer.zero_grad(set_to_none=True)
             with autocast(enabled=(device == "cuda")):
                 preds = model(x_batch)
@@ -183,8 +222,8 @@ def main() -> None:
 
             if iteration in reduce_iters:
                 reduce_lr_by_factor(optimizer, factor=0.1)
-                writer.add_scalar("train/lr_backbone", optimizer.param_groups[0]["lr"], iteration)
-                writer.add_scalar("train/lr_head", optimizer.param_groups[1]["lr"], iteration)
+                for i, pg in enumerate(optimizer.param_groups):
+                    writer.add_scalar(f"train/lr_group{i}", pg["lr"], iteration)
 
             if iteration >= max_iters:
                 break
@@ -195,6 +234,7 @@ def main() -> None:
         val_subset = val_samples if len(val_samples) <= 1000 else list(
             np.random.default_rng(args.seed).choice(val_samples, size=min(256, len(val_samples)), replace=False)
         )
+
         per_meas_mae, overall_mae, tp, acc_10mm = evaluate_subjectwise_model(model, val_subset, device)
 
         writer.add_scalar("val/overall_mae_mm", overall_mae, epoch)
@@ -206,7 +246,7 @@ def main() -> None:
             writer.add_scalar(f"val/mae_{name}_mm", mae, epoch)
 
         print(f"Epoch {epoch+1}/{num_epochs}  Iter {iteration}  Train loss: {avg_train_loss:.6f}  "
-              f"Val overall MAE (mm): {overall_mae:.3f}  Accuracy@10mm: {acc_10mm:.2f}%  TPs: {tp}")
+              f"Val MAE (mm): {overall_mae:.3f}  Acc@10mm: {acc_10mm:.2f}%  TPs: {tp}")
 
         if (epoch + 1) % 5 == 0:
             print("\nFull per-measurement MAE (mm):")
@@ -230,8 +270,9 @@ def main() -> None:
         if iteration >= max_iters:
             break
 
-    print("Training complete. Best validation overall MAE (mm):", best_val)
+    print(" Training complete. Best validation MAE (mm):", best_val)
 
 
 if __name__ == "__main__":
     main()
+
