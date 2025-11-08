@@ -20,6 +20,7 @@ from bodym.data import MEASUREMENT_COLS
 from bodym.model import MNASNetRegressor
 from bodym.utils import RunConfig, seed_everything, save_run_config
 
+
 # ---------------------------------------------------------------------
 # Helper: accuracy computation
 # ---------------------------------------------------------------------
@@ -175,7 +176,6 @@ def main() -> None:
         iteration = 0
         best_val = float("inf")
 
-
     # -------------------- LOGGING SETUP --------------------
     writer = SummaryWriter(log_dir=str(args.out_dir))
     train_size = len(loader.dataset)
@@ -201,16 +201,12 @@ def main() -> None:
     ), args.out_dir)
 
     scaler = GradScaler(enabled=(device == "cuda"))
-    iteration = 0
-    best_val = float("inf")
     args.checkpoint_dir.mkdir(exist_ok=True, parents=True)
-    # Create epoch log file to store the same printed outputs
     epoch_log_path = args.out_dir / "epoch_log.txt"
     os.makedirs(args.out_dir, exist_ok=True)
 
-
     # -------------------- TRAINING LOOP --------------------
-    for epoch in range(start_epoch, num_epochs): #This makes the script resume correctly from where it stopped.
+    for epoch in range(start_epoch, num_epochs):  # resume from last
         model.train()
         running_loss = 0.0
         batch_count = 0
@@ -260,12 +256,11 @@ def main() -> None:
         # Save same text to file
         with open(epoch_log_path, "a") as f:
             f.write(f"Epoch {epoch+1}/{num_epochs}  Iter {iteration}  "
-                 f"Train loss: {avg_train_loss:.6f}  "
-                 f"Val overall MAE (mm): {overall_mae:.3f}  "
-                 f"Accuracy@10mm: {acc_10mm:.2f}%  TPs: {tp}\n")
+                    f"Train loss: {avg_train_loss:.6f}  "
+                    f"Val overall MAE (mm): {overall_mae:.3f}  "
+                    f"Accuracy@10mm: {acc_10mm:.2f}%  TPs: {tp}\n")
 
-
-       if (epoch + 1) % 5 == 0:
+        if (epoch + 1) % 5 == 0:
             print("\nFull per-measurement MAE (mm):")
             with open(epoch_log_path, "a") as f:
                 f.write("Full per-measurement MAE (mm):\n")
@@ -275,8 +270,7 @@ def main() -> None:
                     f.write(f"  {name:>20s}: {mae:7.2f} mm\n")
             print()
             with open(epoch_log_path, "a") as f:
-                 f.write("\n")
-
+                f.write("\n")
 
         ckpt = {
             "epoch": epoch + 1,
@@ -287,7 +281,6 @@ def main() -> None:
         }
         torch.save(ckpt, args.checkpoint_dir / f"checkpoint_epoch_{epoch+1}.pth")
         torch.save(ckpt, args.checkpoint_dir / "checkpoint_latest.pth")
-
 
         if overall_mae < best_val:
             best_val = overall_mae
@@ -301,5 +294,6 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 
