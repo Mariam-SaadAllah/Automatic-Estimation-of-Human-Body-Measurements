@@ -111,12 +111,20 @@ def main() -> None:
 
     model = MNASNetRegressor(num_outputs=14, weights=None if args.weights == "NONE" else args.weights)
     model = model.to(device)
-
+    
     if args.freeze_backbone:
         for name, param in model.named_parameters():
             if "classifier" not in name:
                 param.requires_grad = False
         print("Backbone layers frozen — only regression head will be trained.")
+    
+    # --- Model parameter statistics ---
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"Total parameters: {total_params:,}")
+    print(f"Trainable parameters: {trainable_params:,}")
+    print(f"Frozen parameters: {total_params - trainable_params:,}")
+
 
     optimizer = torch.optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=args.lr)
     criterion = nn.L1Loss()
@@ -312,4 +320,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
