@@ -146,31 +146,54 @@ def main() -> None:
 
     scaler = GradScaler(enabled=(device == "cuda"))
 
-    # ======= RESUME CHECKPOINT LOGIC =======
+    # --- Resume training if a checkpoint exists ---
     args.checkpoint_dir.mkdir(exist_ok=True, parents=True)
-    resume_ckpt = args.checkpoint_dir / "latest_checkpoint.pth"
+    latest_ckpt = args.checkpoint_dir / "latest_checkpoint.pth"
+
     start_epoch = 0
     iteration = 0
     best_val = float("inf")
 
-    if resume_ckpt.exists():
-        print(f"Resuming training from: {resume_ckpt}")
-        ckpt = torch.load(resume_ckpt, map_location=device)
-        model.load_state_dict(ckpt["model_state_dict"])
-        optimizer.load_state_dict(ckpt["optimizer_state_dict"])
-        if "scaler_state_dict" in ckpt:
-            scaler.load_state_dict(ckpt["scaler_state_dict"])
-        start_epoch = ckpt.get("epoch", 0)
-        iteration = ckpt.get("iteration", 0)
-        best_val = ckpt.get("best_val", best_val)
-        print(f"Resumed from epoch {start_epoch}, iteration {iteration}")
+    if latest_ckpt.exists():
+        print(f"Resuming training from: {latest_ckpt}")
+        checkpoint = torch.load(latest_ckpt, map_location=device)
+        model.load_state_dict(checkpoint["model_state_dict"])
+        optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        scaler.load_state_dict(checkpoint.get("scaler_state_dict", scaler.state_dict()))
+        torch.set_rng_state(checkpoint.get("rng_state", torch.get_rng_state()))
+        if torch.cuda.is_available() and checkpoint.get("cuda_rng_state") is not None:
+            torch.cuda.set_rng_state_all(checkpoint["cuda_rng_state"])
+        start_epoch = checkpoint.get("epoch", 0)
+        iteration = checkpoint.get("iteration", 0)
+        best_val = checkpoint.get("best_val", float("inf"))
+        print(f"Resumed at epoch {start_epoch}, iteration {iteration}, best_val {best_val:.3f}")
     else:
-        print("Starting new fine-tuning run")
-    # =======================================
+        print("Starting training from scratch...")
+
 
     if args.eval_only:
+        best_ckpt = args.checkpoint_dir / "best_checkpoint.pth"
+        latest_ckpt = args.checkpoint_dir / "latest_checkpoint.pth"
+
+        # Prefer best checkpoint, fallback to latest if best not found
+        if best_ckpt.exists():
+            print(f"Evaluating from best checkpoint: {best_ckpt}")
+            checkpoint = torch.load(best_ckpt, map_location=device)
+        elif latest_ckpt.exists():
+            print(f"Warning: best_checkpoint.pth not found, evaluating from latest checkpoint: {latest_ckpt}")
+            checkpoint = torch.load(latest_ckpt, map_location=device)
+        else:
+            raise FileNotFoundError("No checkpoint found for evaluation.")
+
+        model.load_state_dict(checkpoint["model_state_dict"])
+
+        # Run evaluation
         _, overall_mae, tp, acc_10mm = evaluate_subjectwise_model(model, val_samples, device)
-        print(f"Eval-only: overall MAE (mm): {overall_mae:.3f}  Accuracy@10mm: {acc_10mm:.2f}%  TPs: {tp}")
+        print("\n==================== EVALUATION RESULTS ====================")
+        print(f"Overall MAE (mm): {overall_mae:.3f}")
+        print(f"Accuracy ≤10 mm:  {acc_10mm:.2f}%")
+        print(f"TPs: {tp}")
+        print("============================================================\n")
         return
 
     metrics_log = []
@@ -242,8 +265,11 @@ def main() -> None:
             "best_val": best_val,
             "model_state_dict": model.state_dict(),
             "optimizer_state_dict": optimizer.state_dict(),
-            "scaler_state_dict": scaler.state_dict(),
+            "scaler_state_dict": scaler.state_dict(),  # NEW: for mixed precision
+            "rng_state": torch.get_rng_state(),        # NEW: for reproducibility
+            "cuda_rng_state": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
         }
+        torch.save(ckpt, args.checkpoint_dir / f"checkpoint_epoch_{epoch+1}.pth")
         torch.save(ckpt, args.checkpoint_dir / "latest_checkpoint.pth")
 
         if overall_mae < best_val:
@@ -286,3 +312,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
