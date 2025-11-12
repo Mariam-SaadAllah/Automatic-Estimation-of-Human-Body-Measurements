@@ -168,9 +168,19 @@ def main() -> None:
         model.load_state_dict(checkpoint["model_state_dict"])
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         scaler.load_state_dict(checkpoint.get("scaler_state_dict", scaler.state_dict()))
-        torch.set_rng_state(checkpoint.get("rng_state", torch.get_rng_state()))
-        if torch.cuda.is_available() and checkpoint.get("cuda_rng_state") is not None:
-            torch.cuda.set_rng_state_all(checkpoint["cuda_rng_state"])
+        # --- Restore RNG safely ---
+        rng_state = checkpoint.get("rng_state", None)
+        if isinstance(rng_state, torch.ByteTensor):
+            torch.set_rng_state(rng_state)
+        else:
+            print(" RNG state in checkpoint not valid, skipping RNG restore.")
+
+        if torch.cuda.is_available():
+            cuda_rng_state = checkpoint.get("cuda_rng_state", None)
+            if isinstance(cuda_rng_state, list) and all(isinstance(x, torch.ByteTensor) for x in cuda_rng_state):
+                torch.cuda.set_rng_state_all(cuda_rng_state)
+            else:
+                print(" CUDA RNG state not valid, skipping CUDA RNG restore.")
         start_epoch = checkpoint.get("epoch", 0)
         iteration = checkpoint.get("iteration", 0)
         best_val = checkpoint.get("best_val", float("inf"))
@@ -320,5 +330,6 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 
