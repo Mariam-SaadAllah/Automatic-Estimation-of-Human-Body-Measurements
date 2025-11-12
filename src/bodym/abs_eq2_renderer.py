@@ -1,190 +1,153 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 """
-Generate SMPL-X silhouettes for frontal (0°) and lateral (90°) views,
-reproducing Eq. (2) input from:
-  "Human Body Measurement Estimation with Adversarial Augmentation"
+Eq.(2) renderer for SMPL-X:
+  x = R(M(β, θ), ι, γ)
+Generates N samples with:
+  - SMPL-X mesh in A-pose (θ = 0)
+  - β ~ N(0, BETA_STD^2)
+  - Two silhouettes (front & side) with a perspective camera at ~1.8 m
+  - Exports .obj meshes and a CSV manifest
 
-Outputs:
-  outputs/mask/<subject_id>.png
-  outputs/mask_left/<subject_id>.png
-
-β is sampled from a small Gaussian distribution around zero
-(β ~ N(0, β_std²)) to produce random but realistic body shapes.
+Usage:
+  python abs_eq2_renderer.py \
+    --model_path "/content/drive/MyDrive/BMNet_Project/smplx/SMPLX_NEUTRAL.npz" \
+    --out_dir eq2_outputs --num 3
 """
 
+import argparse, json
 from pathlib import Path
-import argparse
-import numpy as np
-import torch
-import cv2
-import matplotlib.pyplot as plt
 
+import numpy as np
+import pandas as pd
+import torch
 import smplx
 from pytorch3d.structures import Meshes
+from pytorch3d.io import save_obj
 from pytorch3d.renderer import (
-    FoVPerspectiveCameras,
-    RasterizationSettings,
-    MeshRasterizer,
-    MeshRenderer,
-    SoftSilhouetteShader,
-    look_at_view_transform,
+    FoVPerspectiveCameras, MeshRenderer, MeshRasterizer,
+    RasterizationSettings, SoftSilhouetteShader, look_at_view_transform
 )
+import cv2
 
 
-# ---------------------------------------------------------------------
-# Helper function: render one binary silhouette at a given yaw angle
-# ---------------------------------------------------------------------
-def render_silhouette(mesh: Meshes, yaw_deg: float, H: int, W: int, device: str, out_path: Path) -> np.ndarray:
-    """
-    Render a binary silhouette from a given yaw rotation angle
-    using PyTorch3D's soft silhouette renderer.
+def resolve_model_dir(model_path: str | Path) -> Path:
+    p = Path(model_path)
+    if p.is_file():
+        return p.parent
+    return p
 
-    Parameters
-    ----------
-    mesh : Meshes
-        SMPL-X mesh to render.
-    yaw_deg : float
-        Yaw rotation angle in degrees (0° = frontal, 90° = lateral).
-    H, W : int
-        Image height and width.
-    device : str
-        'cuda' or 'cpu'.
-    out_path : Path
-        Where to save the output binary mask.
 
-    Returns
-    -------
-    np.ndarray
-        Binary mask of shape (H, W), white body on black background.
-    """
-    # Camera placed at distance 2.0 units away, rotated around Y axis by yaw_deg
-    R, T = look_at_view_transform(dist=2.0, elev=0.0, azim=yaw_deg)
-    cameras = FoVPerspectiveCameras(device=device, R=R, T=T)
+def build_smplx_mesh(model_dir: Path, device: str, beta_std: float) -> tuple[Meshes, torch.Tensor, torch.Tensor]:
+    model = smplx.create(
+        model_path=str(model_dir),
+        model_type="smplx",
+        gender="neutral",
+        use_pca=False,
+        flat_hand_mean=True
+    ).to(device)
 
-    # Rasterizer and renderer configuration
-    raster_settings = RasterizationSettings(
-        image_size=(H, W),
-        blur_radius=0.0,
-        faces_per_pixel=1,
-        bin_size=0,  # disable binning (avoids overflow warnings for large meshes)
-        max_faces_per_bin=150000,
-    )
+    betas = beta_std * torch.randn(1, 10, device=device)
+    body_pose = torch.zeros(1, 21*3, device=device)  # A-pose (zeros in SMPL-X)
+    global_orient = torch.zeros(1, 3, device=device)
 
-    renderer = MeshRenderer(
-        rasterizer=MeshRasterizer(cameras=cameras, raster_settings=raster_settings),
+    with torch.no_grad():
+        out = model(
+            betas=betas,
+            body_pose=body_pose,
+            global_orient=global_orient,
+            return_verts=True
+        )
+
+    verts = out.vertices[0]
+    faces = torch.from_numpy(model.faces.astype(np.int64)).to(device)
+    mesh = Meshes(verts=[verts], faces=[faces])
+    return mesh, verts, faces
+
+
+def make_renderer(device: str, img_size: int, fov_deg: float, R, T):
+    cameras = FoVPerspectiveCameras(device=device, R=R, T=T, fov=fov_deg)
+    raster = RasterizationSettings(image_size=img_size)
+    return MeshRenderer(
+        rasterizer=MeshRasterizer(cameras=cameras, raster_settings=raster),
         shader=SoftSilhouetteShader()
     )
 
-    # Forward pass: RGBA silhouette image
-    rgba = renderer(mesh, cameras=cameras)  # (1, H, W, 4)
-    mask = (rgba[0, ..., 3] > 0.5).detach().cpu().numpy().astype(np.uint8) * 255
-    cv2.imwrite(str(out_path), mask)
-    return mask
+
+def render_silhouette(mesh: Meshes, device: str, camera_dist: float, fov_deg: float, img_size: int, azim_deg: float) -> np.ndarray:
+    R, T = look_at_view_transform(dist=camera_dist, elev=0.0, azim=azim_deg, device=device)
+    renderer = make_renderer(device, img_size, fov_deg, R, T)
+    rgba = renderer(mesh)
+    alpha = rgba[0, ..., 3].clamp(0, 1).detach().cpu().numpy()
+    img = (alpha * 255).astype(np.uint8)
+    return img
 
 
-# ---------------------------------------------------------------------
-# Main function
-# ---------------------------------------------------------------------
+def save_png_gray(path: Path, img: np.ndarray):
+    cv2.imwrite(str(path), img)
+
+
 def main():
-    parser = argparse.ArgumentParser(description="Render SMPL-X silhouettes (front + side) using PyTorch3D.")
-    parser.add_argument(
-        "--model_path",
-        type=str,
-        default="/content/drive/MyDrive/BMNet_Project/smplx/SMPLX_NEUTRAL.npz",
-        help="Path to a SMPL-X model file (.npz or .pkl)."
-    )
-    parser.add_argument("--subject_id", type=str, default="subj_0001", help="Output subject identifier (filename stem).")
-    parser.add_argument("--gender", type=str, default="NEUTRAL", choices=["NEUTRAL", "MALE", "FEMALE"], help="SMPL-X gender model.")
-    parser.add_argument("--num_betas", type=int, default=10, help="Number of shape coefficients (β).")
-    parser.add_argument("--beta_std", type=float, default=0.03, help="Standard deviation for β ~ N(0, β_std²).")
-    parser.add_argument("--img_h", type=int, default=640, help="Silhouette image height (default: 640).")
-    parser.add_argument("--img_w", type=int, default=480, help="Silhouette image width (default: 480).")
-    parser.add_argument("--out_root", type=str, default="outputs", help="Root output directory.")
-    parser.add_argument("--show", action="store_true", help="Display the generated silhouettes.")
+    parser = argparse.ArgumentParser(description="SMPL-X Eq.(2) silhouette renderer")
+    parser.add_argument("--model_path", type=str, required=True, help="Path to SMPL-X model .npz file OR the directory containing it")
+    parser.add_argument("--out_dir", type=str, default="eq2_outputs", help="Output directory")
+    parser.add_argument("--num", type=int, default=3, help="Number of samples to generate")
+    parser.add_argument("--img_size", type=int, default=512, help="Silhouette image size (square)")
+    parser.add_argument("--camera_dist", type=float, default=1.8, help="Camera distance in meters (paper ~1.68–1.98 m)")
+    parser.add_argument("--fov_deg", type=float, default=60.0, help="Camera field of view in degrees")
+    parser.add_argument("--beta_std", type=float, default=0.03, help="Std-dev for shape betas (around zero)")
+    parser.add_argument("--seed", type=int, default=42, help="Random seed")
     args = parser.parse_args()
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    torch.manual_seed(args.seed)
+    np.random.seed(args.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(args.seed)
 
-    # Validate model path
-    model_file = Path(args.model_path)
-    if not model_file.exists():
-        raise FileNotFoundError(f"SMPL-X model file not found:\n  {model_file}")
-    smpl_dir = str(model_file.parent)
+    out_dir = Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Output directory structure
-    out_root = Path(args.out_root)
-    out_mask = out_root / "mask"
-    out_mask_left = out_root / "mask_left"
-    out_mask.mkdir(parents=True, exist_ok=True)
-    out_mask_left.mkdir(parents=True, exist_ok=True)
+    model_dir = resolve_model_dir(args.model_path)
 
-    # -----------------------------------------------------------------
-    # 1) Load SMPL-X model
-    # -----------------------------------------------------------------
-    model = smplx.SMPLX(
-        model_path=smpl_dir,
-        model_type="smplx",
-        gender=args.gender.lower(),
-        num_betas=args.num_betas,
-        use_pca=False,
-        flat_hand_mean=True,
-    ).to(device)
+    records = []
+    for i in range(args.num):
+        mesh, verts, faces = build_smplx_mesh(model_dir, device, args.beta_std)
 
-    # -----------------------------------------------------------------
-    # 2) Sample shape coefficients β ~ N(0, β_std²)
-    # -----------------------------------------------------------------
-    with torch.no_grad():
-        betas = torch.randn(1, args.num_betas, device=device) * args.beta_std
+        obj_path = out_dir / f"sample_{i+1:03d}.obj"
+        save_obj(obj_path, verts.cpu(), faces.cpu())
 
-        # Neutral pose and expression
-        output = model(
-            betas=betas,
-            body_pose=torch.zeros(1, 21 * 3, device=device),
-            global_orient=torch.zeros(1, 3, device=device),
-            left_hand_pose=torch.zeros(1, 15 * 3, device=device),
-            right_hand_pose=torch.zeros(1, 15 * 3, device=device),
-            expression=torch.zeros(1, 10, device=device),
-            return_verts=True,
-        )
+        sil_front = render_silhouette(mesh, device, args.camera_dist, args.fov_deg, args.img_size, azim_deg=0.0)
+        sil_side  = render_silhouette(mesh, device, args.camera_dist, args.fov_deg, args.img_size, azim_deg=90.0)
 
-    # -----------------------------------------------------------------
-    # 3) Construct a PyTorch3D mesh
-    # -----------------------------------------------------------------
-    verts = output.vertices[0].unsqueeze(0)  # (1, V, 3)
-    faces = torch.as_tensor(model.faces.astype(np.int64), device=device).unsqueeze(0)  # (1, F, 3)
-    mesh = Meshes(verts=verts, faces=faces)
+        front_path = out_dir / f"sample_{i+1:03d}_sil_front.png"
+        side_path  = out_dir / f"sample_{i+1:03d}_sil_side.png"
+        save_png_gray(front_path, sil_front)
+        save_png_gray(side_path,  sil_side)
 
-    # -----------------------------------------------------------------
-    # 4) Render frontal and lateral silhouettes
-    # -----------------------------------------------------------------
-    H, W = args.img_h, args.img_w
-    front_path = out_mask / f"{args.subject_id}.png"
-    side_path = out_mask_left / f"{args.subject_id}.png"
+        records.append({
+            "sample_id": i+1,
+            "obj_path": str(obj_path),
+            "sil_front_path": str(front_path),
+            "sil_side_path": str(side_path),
+            "camera_distance_m": args.camera_dist,
+            "fov_deg": args.fov_deg,
+            "image_size_px": args.img_size,
+            "azim_front_deg": 0.0,
+            "azim_side_deg": 90.0,
+            "beta_std": args.beta_std,
+            "pose": "A-pose (zeros)",
+            "renderer": "PyTorch3D SoftSilhouetteShader, FoV perspective"
+        })
 
-    mask_front = render_silhouette(mesh, yaw_deg=0.0, H=H, W=W, device=device, out_path=front_path)
-    mask_side = render_silhouette(mesh, yaw_deg=90.0, H=H, W=W, device=device, out_path=side_path)
+    # Write CSV manifest
+    csv_path = out_dir / "eq2_manifest.csv"
+    pd.DataFrame.from_records(records).to_csv(csv_path, index=False)
 
-    print(f"Saved silhouettes:\n  {front_path}\n  {side_path}")
-
-    # -----------------------------------------------------------------
-    # 5) Optional: visualization for inspection
-    # -----------------------------------------------------------------
-    if args.show:
-        fig, ax = plt.subplots(1, 2, figsize=(8, 6))
-        ax[0].imshow(mask_front, cmap="gray")
-        ax[0].set_title("Frontal (0°)")
-        ax[0].axis("off")
-        ax[1].imshow(mask_side, cmap="gray")
-        ax[1].set_title("Lateral (90°)")
-        ax[1].axis("off")
-        plt.tight_layout()
-        plt.show()
+    print(f"Done. Wrote {len(records)} samples to {out_dir}")
+    print(f"CSV manifest: {csv_path}")
 
 
 if __name__ == "__main__":
     main()
-
-
-
-
-
