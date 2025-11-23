@@ -61,11 +61,25 @@ class Sample:
     y: list[float]     # (alias of y_cm for compatibility)
 
 def build_samples(split_dir: Path) -> Tuple[list[dict[str, Any]]:
-    """
+     """
     Read dataset CSV files from the given split directory (e.g., train, testA, testB)
-    and build a list of sample dicts. Returns the list of samples and the min/max of 
-    height and weight (for normalization reference).
-    """
+    and build a list of sample dictionaries.
+
+    Each sample dictionary contains:
+      - photo_id: ID for the subject's images
+      - frontal: path to the frontal silhouette image
+      - lateral: path to the lateral silhouette image
+      - height: normalized height (0–1)
+      - weight: normalized weight (0–1)
+      - height_cm: original height in centimeters
+      - weight_kg: original weight in kilograms
+      - subject_id: ID of the subject
+      - y_cm: list of 14 body measurements in centimeters
+      - y: alias of y_cm
+
+    The function returns:
+      - samples: a list of dictionaries, one per subject.
+     """
     # Read CSV files containing measurements, subject-to-photo mapping, and height/weight/gender.
     measurements_df = pd.read_csv(split_dir / "measurements.csv")
     subject_map_df = pd.read_csv(split_dir / "subject_to_photo_map.csv")
@@ -187,6 +201,7 @@ class BodyMDataset(Dataset):
         y_tensor = torch.from_numpy(y_norm).float()
         subject_id = s["subject_id"]
         return x, y_tensor, subject_id
+
 
 
 
