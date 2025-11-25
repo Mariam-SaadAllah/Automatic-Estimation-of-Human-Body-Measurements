@@ -34,34 +34,6 @@ def reduce_lr_by_factor(opt: torch.optim.Optimizer, factor: float = 0.1) -> None
         pg["lr"] *= factor
 # ---------------------------------------------------------------------
 
-
-def evaluate_subjectwise_model(model: nn.Module, sample_list: list[dict], device: str):
-    model.eval()
-    maes_by_subject: dict[str, list[np.ndarray]] = {}
-    with torch.no_grad():
-        for s in sample_list:
-            ds = BodyMDataset([s])
-            loader = DataLoader(ds, batch_size=1, shuffle=False, num_workers=0)
-            for x, y, sid in loader:
-                x = x.to(device)
-                y = y.to(device)
-                pred = model(x)
-                pred_mm = (pred + 1) / 2 * (torch.from_numpy(Y_MAX_MM).to(device) - torch.from_numpy(Y_MIN_MM).to(device)) + torch.from_numpy(Y_MIN_MM).to(device)
-                y_mm = (y + 1) / 2 * (torch.from_numpy(Y_MAX_MM).to(device) - torch.from_numpy(Y_MIN_MM).to(device)) + torch.from_numpy(Y_MIN_MM).to(device)
-                err = torch.abs(pred_mm - y_mm).cpu().numpy()[0]
-                maes_by_subject.setdefault(sid[0], []).append(err)
-    subj_maes = np.array([np.mean(errors, axis=0) for errors in maes_by_subject.values()])
-    per_measurement_mae = subj_maes.mean(axis=0)
-    overall_mae = float(per_measurement_mae.mean())
-    tp = {
-        "TP50": float(np.quantile(subj_maes, q=0.50, axis=0).mean()),
-        "TP75": float(np.quantile(subj_maes, q=0.75, axis=0).mean()),
-        "TP90": float(np.quantile(subj_maes, q=0.90, axis=0).mean()),
-    }
-    accuracy_10mm = compute_accuracy_mm(subj_maes, threshold_mm=10.0)
-    return per_measurement_mae, overall_mae, tp, accuracy_10mm
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train BodyM MNASNet Regressor model.")
     parser.add_argument("--data_root", type=Path, required=True)
@@ -330,6 +302,7 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
 
 
