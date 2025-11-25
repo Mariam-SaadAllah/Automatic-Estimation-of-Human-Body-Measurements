@@ -31,45 +31,59 @@ def compute_accuracy_mm(errors: np.ndarray, threshold_mm: float = 10.0) -> float
 
 def evaluate_subjectwise_mm(model: torch.nn.Module, samples: list[dict], device: str):
     """
-    Evaluate model on a list of sample dicts (all from one dataset split), 
-    computing MAE per measurement per subject.
+    Subject-wise evaluation using the same logic as training.
     Returns:
-        overall_mae (float): mean absolute error across all measurements (mm)
-        tp (dict): TP50/75/90 values
-        per_meas_mae (np.ndarray): MAE per body measurement (14,)
-        acc_10mm (float): percentage of measurements within ±10 mm
+        overall_mae (float)
+        tp (dict)
+        per_meas_mae (np.ndarray)
+        acc_10mm (float)
     """
     model.eval()
     maes_by_subject: dict[str, list[np.ndarray]] = {}
+
     with torch.no_grad():
         for s in samples:
             ds = BodyMDataset([s])
             loader = DataLoader(ds, batch_size=1, shuffle=False, num_workers=0)
+
             for x, y, sid in loader:
                 x = x.to(device)
                 y = y.to(device)
+
                 pred = model(x)
-                # Unnormalize predictions and ground-truths back to millimeters
-                pred_mm = (pred + 1) / 2 * (torch.from_numpy(Y_MAX_MM).to(device) - torch.from_numpy(Y_MIN_MM).to(device)) + torch.from_numpy(Y_MIN_MM).to(device)
-                y_mm = (y + 1) / 2 * (torch.from_numpy(Y_MAX_MM).to(device) - torch.from_numpy(Y_MIN_MM).to(device)) + torch.from_numpy(Y_MIN_MM).to(device)
 
-                # Compute absolute errors in millimeters
+                # Undo normalization: [-1,1] → mm
+                scale = torch.from_numpy(Y_MAX_MM - Y_MIN_MM).to(device)
+                offset = torch.from_numpy(Y_MIN_MM).to(device)
+
+                pred_mm = (pred + 1) / 2 * scale + offset
+                y_mm = (y + 1) / 2 * scale + offset
+
+                # absolute error vector (14,)
                 err = torch.abs(pred_mm - y_mm).cpu().numpy()[0]
-                maes_by_subject.setdefault(sid[0], []).append(err)
 
-    # Average multiple samples per subject
-    subj_maes = np.array([np.mean(v, axis=0) for v in maes_by_subject.values()])
-    per_meas_mae = subj_maes.mean(axis=0)  # (14,)
+                subj = sid[0]
+                maes_by_subject.setdefault(subj, []).append(err)
+
+    # Combine sample errors → average per subject
+    subj_maes = np.array([
+        np.mean(err_list, axis=0) for err_list in maes_by_subject.values()
+    ])  # shape (num_subjects, 14)
+
+    # Per-measurement MAE
+    per_meas_mae = subj_maes.mean(axis=0)
+
+    # Overall MAE
     overall_mae = float(per_meas_mae.mean())
 
-    # Compute percentile thresholds (TP50, TP75, TP90)
+    # Correct TP metrics (same as training.py)
     tp = {
-        "TP50": float(np.percentile(subj_maes, 50)),
-        "TP75": float(np.percentile(subj_maes, 75)),
-        "TP90": float(np.percentile(subj_maes, 90)),
+        "TP50": float(np.quantile(subj_maes, 0.50, axis=0).mean()),
+        "TP75": float(np.quantile(subj_maes, 0.75, axis=0).mean()),
+        "TP90": float(np.quantile(subj_maes, 0.90, axis=0).mean()),
     }
 
-    # --- NEW: Accuracy@10mm ---
+    # Accuracy @ 10 mm
     acc_10mm = compute_accuracy_mm(subj_maes, threshold_mm=10.0)
 
     return overall_mae, tp, per_meas_mae, acc_10mm
@@ -162,3 +176,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
