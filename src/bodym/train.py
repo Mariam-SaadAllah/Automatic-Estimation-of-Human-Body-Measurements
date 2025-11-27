@@ -22,12 +22,8 @@ from bodym.utils import RunConfig, seed_everything, save_run_config
 
 
 # ---------------------------------------------------------------------
-# Helper functions
+# Helper
 # ---------------------------------------------------------------------
-def compute_accuracy_mm(errors: np.ndarray, threshold_mm: float = 10.0) -> float:
-    within = (errors <= threshold_mm).astype(np.float32)
-    return 100.0 * within.mean()
-
 
 def reduce_lr_by_factor(opt: torch.optim.Optimizer, factor: float = 0.1) -> None:
     for pg in opt.param_groups:
@@ -72,8 +68,14 @@ def main() -> None:
         train_subjects, val_subjects = train_test_split(subject_ids, test_size=0.1, random_state=args.seed)
         train_samples = [s for sid in train_subjects for s in subject_to_samples[sid]]
         val_samples = [s for sid in val_subjects for s in subject_to_samples[sid]]
-        print(f"Training subjects: {len(train_subjects)}, Validation subjects: {len(val_subjects)}")
-        print(f"Training samples:  {len(train_samples)}, Validation samples:  {len(val_samples)}")
+
+        print("=========================================")
+        print(f"Total subjects:      {len(subject_ids)}")
+        print(f"Training subjects:   {len(train_subjects)}")
+        print(f"Validation subjects: {len(val_subjects)}")
+        print(f"Training samples:    {len(train_samples)}")
+        print(f"Validation samples:  {len(val_samples)}")
+        print("=========================================")
     else:
         train_samples = samples
         val_samples = samples
@@ -84,6 +86,7 @@ def main() -> None:
     model = MNASNetRegressor(num_outputs=14, weights=None if args.weights == "NONE" else args.weights)
     model = model.to(device)
     
+    # FREEZING OPTIONAL – minimal change: no forced freeze
     if args.freeze_backbone:
         for name, param in model.named_parameters():
             if "classifier" not in name:
@@ -219,14 +222,8 @@ def main() -> None:
 
         avg_train_loss = running_loss / max(1, batch_count)
 
-        if args.split == "train":
-            val_subset = val_samples if len(val_samples) <= 1000 else list(
-                np.random.default_rng(args.seed).choice(val_samples, size=min(256, len(val_samples)), replace=False)
-            )
-        else:
-            val_subset = val_samples
-
-        per_meas_mae, overall_mae, tp, acc_10mm = evaluate_subjectwise_model(model, val_subset, device)
+        # --- Always evaluate on FULL validation set ---
+        per_meas_mae, overall_mae, tp, acc_10mm = evaluate_subjectwise_model(model, val_samples, device)
 
         writer.add_scalar("train/loss_epoch", avg_train_loss, epoch)
         writer.add_scalar("val/overall_mae_mm", overall_mae, epoch)
@@ -302,8 +299,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
-
-
-
-
