@@ -1,7 +1,7 @@
 import json
 import os
 import random
-from dataclasses import dataclass, asdict, asdict
+from dataclasses import dataclass, asdict
 from pathlib import Path
 
 import numpy as np
@@ -48,5 +48,3 @@ def save_json(obj: dict, path: Path) -> None:
 def save_run_config(config: RunConfig, out_dir: Path) -> None:
     """Save the RunConfig dataclass as a JSON file in the output directory."""
     save_json(asdict(config), Path(out_dir) / "config.json")
-
-
