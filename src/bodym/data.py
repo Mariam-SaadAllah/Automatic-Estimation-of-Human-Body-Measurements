@@ -75,14 +75,23 @@ def build_samples(split_dir: Path) -> list[dict[str, Any]]:
     # Build dictionaries for quick lookup by subject_id.
     subj_to_hw = {row["subject_id"]: row for _, row in hwg_meta_df.iterrows()}
     subj_to_measure = {row["subject_id"]: row for _, row in measurements_df.iterrows()}
-    subj_to_pid = {row["subject_id"]: row["photo_id"] for _, row in subject_map_df.iterrows()}
 
     samples: list[dict[str, Any]] = []
-    for subj, pid in subj_to_pid.items():
-        frontal_img_path = mask_dir / f"{pid}.png"
-        lateral_img_path = mask_left_dir / f"{pid}.png"
-        if not frontal_img_path.exists() or not lateral_img_path.exists():
+
+    # iterate through ALL rows (subject_id, photo_id)
+    for _, row in subject_map_df.iterrows():
+
+        subj = row["subject_id"]
+        pid = row["photo_id"]
+
+        # Load *all* matching silhouette files
+        frontal_list = sorted(mask_dir.glob(f"{pid}*.png"))
+        lateral_list = sorted(mask_left_dir.glob(f"{pid}*.png"))
+
+        if len(frontal_list) == 0 or len(lateral_list) == 0:
             continue
+
+        num_pairs = min(len(frontal_list), len(lateral_list))
 
         hw = subj_to_hw.get(subj)
         meas_row = subj_to_measure.get(subj)
@@ -97,18 +106,20 @@ def build_samples(split_dir: Path) -> list[dict[str, Any]]:
 
         y_cm = [float(meas_row[c]) for c in MEASUREMENT_COLS]
 
-        samples.append({
-            "photo_id": pid,
-            "frontal": str(frontal_img_path),
-            "lateral": str(lateral_img_path),
-            "height": height_norm,
-            "weight": weight_norm,
-            "height_cm": height_cm,
-            "weight_kg": weight_kg,
-            "subject_id": subj,
-            "y_cm": y_cm,
-            "y": y_cm,
-        })
+        # create one sample per silhouette pair
+        for i in range(num_pairs):
+            samples.append({
+                "photo_id": f"{pid}_{i}",
+                "frontal": str(frontal_list[i]),
+                "lateral": str(lateral_list[i]),
+                "height": height_norm,
+                "weight": weight_norm,
+                "height_cm": height_cm,
+                "weight_kg": weight_kg,
+                "subject_id": subj,
+                "y_cm": y_cm,
+                "y": y_cm,
+            })
 
     return samples
 
@@ -159,3 +170,4 @@ class BodyMDataset(Dataset):
         y_tensor = torch.from_numpy(y_norm).float()
         subject_id = s["subject_id"]
         return x, y_tensor, subject_id
+
