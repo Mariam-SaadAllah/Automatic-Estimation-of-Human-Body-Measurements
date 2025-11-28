@@ -15,16 +15,17 @@ from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 
 from bodym.data import BodyMDataset, build_samples
-from bodym.data import Y_MIN_MM, Y_MAX_MM
 from bodym.data import MEASUREMENT_COLS
 from bodym.model import MNASNetRegressor
 from bodym.utils import RunConfig, seed_everything, save_run_config
+
+# ✅ IMPORT THE CORRECT EVALUATION FUNCTION
+from bodym.evaluate import evaluate_subjectwise_mm
 
 
 # ---------------------------------------------------------------------
 # Helper
 # ---------------------------------------------------------------------
-
 def reduce_lr_by_factor(opt: torch.optim.Optimizer, factor: float = 0.1) -> None:
     for pg in opt.param_groups:
         pg["lr"] *= factor
@@ -40,13 +41,13 @@ def main() -> None:
     parser.add_argument("--max_iters", type=int, default=150_000)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--num_workers", type=int, default=2)
-    # ======= COLAB DRIVE PATHS =======
+
     DEFAULT_DRIVE_ROOT = Path("/content/drive/MyDrive/BMNet_Project")
     DEFAULT_OUT_DIR = DEFAULT_DRIVE_ROOT / "runs/fine_tune_full"
     DEFAULT_CKPT_DIR = DEFAULT_DRIVE_ROOT / "checkpoints/fine_tune_full"
     parser.add_argument("--out_dir", type=Path, default=DEFAULT_OUT_DIR)
     parser.add_argument("--checkpoint_dir", type=Path, default=DEFAULT_CKPT_DIR)
-    # ================================
+
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--weights", type=str, default="IMAGENET1K_V1",
                         choices=["IMAGENET1K_V1", "DEFAULT", "NONE"])
@@ -60,6 +61,7 @@ def main() -> None:
     split_dir = Path(args.data_root) / args.split
     samples = build_samples(split_dir)
 
+    # -------- Subject-wise split --------
     if args.split == "train":
         subject_to_samples = collections.defaultdict(list)
         for s in samples:
@@ -85,21 +87,19 @@ def main() -> None:
 
     model = MNASNetRegressor(num_outputs=14, weights=None if args.weights == "NONE" else args.weights)
     model = model.to(device)
-    
-    # FREEZING OPTIONAL – minimal change: no forced freeze
+
     if args.freeze_backbone:
         for name, param in model.named_parameters():
             if "classifier" not in name:
                 param.requires_grad = False
         print("Backbone layers frozen — only regression head will be trained.")
-    
-    # --- Model parameter statistics ---
+
+    # --- Parameter statistics ---
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Total parameters: {total_params:,}")
     print(f"Trainable parameters: {trainable_params:,}")
     print(f"Frozen parameters: {total_params - trainable_params:,}")
-
 
     optimizer = torch.optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=args.lr)
     criterion = nn.L1Loss()
@@ -129,8 +129,8 @@ def main() -> None:
 
     scaler = GradScaler(enabled=(device == "cuda"))
 
-    # --- Resume training if a checkpoint exists ---
-    args.checkpoint_dir.mkdir(exist_ok=True, parents=True)
+    # ---------------- Resume training ----------------
+    args.checkpoint_dir.mkdir(parents=True, exist_ok=True)
     latest_ckpt = args.checkpoint_dir / "latest_checkpoint.pth"
 
     start_epoch = 0
@@ -143,19 +143,15 @@ def main() -> None:
         model.load_state_dict(checkpoint["model_state_dict"])
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         scaler.load_state_dict(checkpoint.get("scaler_state_dict", scaler.state_dict()))
-        # --- Restore RNG safely ---
-        rng_state = checkpoint.get("rng_state", None)
-        if isinstance(rng_state, torch.ByteTensor):
-            torch.set_rng_state(rng_state)
-        else:
-            print(" RNG state in checkpoint not valid, skipping RNG restore.")
+
+        if isinstance(checkpoint.get("rng_state"), torch.ByteTensor):
+            torch.set_rng_state(checkpoint["rng_state"])
 
         if torch.cuda.is_available():
-            cuda_rng_state = checkpoint.get("cuda_rng_state", None)
-            if isinstance(cuda_rng_state, list) and all(isinstance(x, torch.ByteTensor) for x in cuda_rng_state):
+            cuda_rng_state = checkpoint.get("cuda_rng_state")
+            if isinstance(cuda_rng_state, list):
                 torch.cuda.set_rng_state_all(cuda_rng_state)
-            else:
-                print(" CUDA RNG state not valid, skipping CUDA RNG restore.")
+
         start_epoch = checkpoint.get("epoch", 0)
         iteration = checkpoint.get("iteration", 0)
         best_val = checkpoint.get("best_val", float("inf"))
@@ -163,41 +159,17 @@ def main() -> None:
     else:
         print("Starting training from scratch...")
 
-
-    if args.eval_only:
-        best_ckpt = args.checkpoint_dir / "best_checkpoint.pth"
-        latest_ckpt = args.checkpoint_dir / "latest_checkpoint.pth"
-
-        # Prefer best checkpoint, fallback to latest if best not found
-        if best_ckpt.exists():
-            print(f"Evaluating from best checkpoint: {best_ckpt}")
-            checkpoint = torch.load(best_ckpt, map_location=device)
-        elif latest_ckpt.exists():
-            print(f"Warning: best_checkpoint.pth not found, evaluating from latest checkpoint: {latest_ckpt}")
-            checkpoint = torch.load(latest_ckpt, map_location=device)
-        else:
-            raise FileNotFoundError("No checkpoint found for evaluation.")
-
-        model.load_state_dict(checkpoint["model_state_dict"])
-
-        # Run evaluation
-        _, overall_mae, tp, acc_10mm = evaluate_subjectwise_model(model, val_samples, device)
-        print("\n==================== EVALUATION RESULTS ====================")
-        print(f"Overall MAE (mm): {overall_mae:.3f}")
-        print(f"Accuracy ≤10 mm:  {acc_10mm:.2f}%")
-        print(f"TPs: {tp}")
-        print("============================================================\n")
-        return
-
+    # ---------------- TRAINING LOOP ----------------
     metrics_log = []
 
-    # ---------------- TRAINING LOOP ----------------
     for epoch in range(start_epoch, num_epochs):
+
         model.train()
         running_loss = 0.0
         batch_count = 0
 
         for x_batch, y_batch, _ in loader:
+
             x_batch = x_batch.to(device)
             y_batch = y_batch.to(device)
 
@@ -205,16 +177,17 @@ def main() -> None:
             with autocast(enabled=(device == "cuda")):
                 preds = model(x_batch)
                 loss = criterion(preds, y_batch)
+
             scaler.scale(loss).backward()
             scaler.step(optimizer)
             scaler.update()
 
-            running_loss += float(loss.item())
+            running_loss += loss.item()
             batch_count += 1
             iteration += 1
 
             if iteration in reduce_iters:
-                reduce_lr_by_factor(optimizer, factor=0.1)
+                reduce_lr_by_factor(optimizer)
                 writer.add_scalar("train/lr", optimizer.param_groups[0]["lr"], iteration)
 
             if iteration >= max_iters:
@@ -222,9 +195,14 @@ def main() -> None:
 
         avg_train_loss = running_loss / max(1, batch_count)
 
-        # --- Always evaluate on FULL validation set ---
-        per_meas_mae, overall_mae, tp, acc_10mm = evaluate_subjectwise_model(model, val_samples, device)
+        # ---------------------------------------------------------
+        # ✅ FIXED: USE THE CORRECT SUBJECT-WISE EVALUATION FUNCTION
+        # ---------------------------------------------------------
+        overall_mae, tp, per_meas_mae, acc_10mm = evaluate_subjectwise_mm(
+            model, val_samples, device
+        )
 
+        # ---- Logging ----
         writer.add_scalar("train/loss_epoch", avg_train_loss, epoch)
         writer.add_scalar("val/overall_mae_mm", overall_mae, epoch)
         writer.add_scalar("val/accuracy_10mm", acc_10mm, epoch)
@@ -235,16 +213,15 @@ def main() -> None:
         for name, mae in zip(MEASUREMENT_COLS, per_meas_mae):
             writer.add_scalar(f"val/mae_{name}_mm", mae, epoch)
 
-        print(f"Epoch {epoch+1}/{num_epochs}  Iter {iteration}  Train loss: {avg_train_loss:.6f}  "
-              f"Val overall MAE (mm): {overall_mae:.3f}  Accuracy@10mm: {acc_10mm:.2f}%  TPs: {tp}")
+        print(
+            f"Epoch {epoch+1}/{num_epochs} Iter {iteration} "
+            f"Train loss: {avg_train_loss:.6f} "
+            f"Val MAE: {overall_mae:.3f} "
+            f"Acc@10mm: {acc_10mm:.2f}% "
+            f"TPs: {tp}"
+        )
 
-        if (epoch + 1) % 5 == 0:
-            print("\nFull per-measurement MAE (mm):")
-            for name, mae in zip(MEASUREMENT_COLS, per_meas_mae):
-                print(f"  {name:>20s}: {mae:7.2f} mm")
-            print()
-
-        # ======= SAVE CHECKPOINTS =======
+        # -------------- Save checkpoints --------------
         ckpt = {
             "epoch": epoch + 1,
             "iteration": iteration,
@@ -252,10 +229,11 @@ def main() -> None:
             "best_val": best_val,
             "model_state_dict": model.state_dict(),
             "optimizer_state_dict": optimizer.state_dict(),
-            "scaler_state_dict": scaler.state_dict(),  # NEW: for mixed precision
-            "rng_state": torch.get_rng_state(),        # NEW: for reproducibility
+            "scaler_state_dict": scaler.state_dict(),
+            "rng_state": torch.get_rng_state(),
             "cuda_rng_state": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
         }
+
         torch.save(ckpt, args.checkpoint_dir / f"checkpoint_epoch_{epoch+1}.pth")
         torch.save(ckpt, args.checkpoint_dir / "latest_checkpoint.pth")
 
@@ -263,7 +241,6 @@ def main() -> None:
             best_val = overall_mae
             torch.save(ckpt, args.checkpoint_dir / "best_checkpoint.pth")
             torch.save(model.state_dict(), args.checkpoint_dir / "best_mnasnet_bmnet.pt")
-        # =================================
 
         metrics_log.append({
             "epoch": epoch + 1,
@@ -280,21 +257,12 @@ def main() -> None:
         if iteration >= max_iters:
             break
 
+    # ---------------- Save metrics ----------------
     df = pd.DataFrame(metrics_log)
-    csv_path = args.out_dir / "epoch_metrics.csv"
-    df.to_csv(csv_path, index=False)
-    print(f"Saved detailed epoch metrics to {csv_path}")
+    df.to_csv(args.out_dir / "epoch_metrics.csv", index=False)
 
-    with open(args.out_dir / "training_summary.txt", "w") as f:
-        f.write(f"Best Validation MAE (mm): {best_val:.3f}\n")
-        f.write(f"Total epochs: {epoch+1}\n")
-        f.write(f"Final iteration: {iteration}\n")
-        f.write(f"Learning rate: {optimizer.param_groups[0]['lr']}\n")
-        f.write("Per-measurement MAE (mm):\n")
-        for name, mae in zip(MEASUREMENT_COLS, per_meas_mae):
-            f.write(f"  {name:>20s}: {mae:7.2f}\n")
-    print("Saved training summary for thesis documentation.")
-    print("Training complete. Best validation overall MAE (mm):", best_val)
+    print("Training complete.")
+    print("Best validation MAE (mm):", best_val)
 
 
 if __name__ == "__main__":
