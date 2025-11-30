@@ -149,8 +149,15 @@ def main() -> None:
 
         if torch.cuda.is_available():
             cuda_rng_state = checkpoint.get("cuda_rng_state")
-            if isinstance(cuda_rng_state, list):
+            # Only restore if valid list of ByteTensors (prevents crash)
+            if (
+                isinstance(cuda_rng_state, list)
+                and len(cuda_rng_state) > 0
+                and all(isinstance(x, torch.ByteTensor) for x in cuda_rng_state)
+            ):
                 torch.cuda.set_rng_state_all(cuda_rng_state)
+            else:
+                print(" CUDA RNG state invalid → skipping restore.")
 
         start_epoch = checkpoint.get("epoch", 0)
         iteration = checkpoint.get("iteration", 0)
@@ -267,3 +274,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
