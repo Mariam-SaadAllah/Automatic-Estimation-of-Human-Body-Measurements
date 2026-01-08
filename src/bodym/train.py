@@ -67,7 +67,7 @@ def evaluate_subjectwise_model(model: nn.Module, sample_list: list[dict], device
     return per_measurement_mae, overall_mae, tp, accuracy_10mm
 
 
-# ✅ NEW: compute validation loss in normalized space (same as training loss)
+# compute validation loss in normalized space (same as training loss)
 def evaluate_val_loss_norm(
     model: nn.Module,
     sample_list: list[dict],
@@ -112,8 +112,12 @@ def main() -> None:
     parser.add_argument("--checkpoint_dir", type=Path, default=DEFAULT_CKPT_DIR)
 
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--weights", type=str, default="IMAGENET1K_V1",
-                        choices=["IMAGENET1K_V1", "DEFAULT", "NONE"])
+    parser.add_argument(
+        "--weights",
+        type=str,
+        default="IMAGENET1K_V1",
+        choices=["IMAGENET1K_V1", "DEFAULT", "NONE"],
+    )
     parser.add_argument("--eval_only", action="store_true")
     parser.add_argument("--freeze_backbone", action="store_true")
     args = parser.parse_args()
@@ -146,6 +150,14 @@ def main() -> None:
                 param.requires_grad = False
         print("Backbone layers frozen — only regression head will be trained.")
 
+    # --- Model parameter statistics ---
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    frozen_params = total_params - trainable_params
+    print(f"Total parameters:     {total_params:,}")
+    print(f"Trainable parameters: {trainable_params:,}")
+    print(f"Frozen parameters:    {frozen_params:,}")
+
     optimizer = torch.optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=args.lr)
     criterion = nn.L1Loss()
     writer = SummaryWriter(log_dir=str(args.out_dir))
@@ -156,21 +168,24 @@ def main() -> None:
     reduce_iters = [int(0.75 * max_iters), int(0.88 * max_iters)]
     num_epochs = math.ceil(max_iters / iters_per_epoch)
 
-    save_run_config(RunConfig(
-        data_root=Path(args.data_root),
-        split=args.split,
-        batch_size=args.batch_size,
-        single_h=args.single_h,
-        single_w=args.single_w,
-        max_iters=args.max_iters,
-        reduce_iters=tuple(reduce_iters),
-        learning_rate=args.lr,
-        num_workers=args.num_workers,
-        out_dir=args.out_dir,
-        checkpoint_dir=args.checkpoint_dir,
-        seed=args.seed,
-        device=device,
-    ), args.out_dir)
+    save_run_config(
+        RunConfig(
+            data_root=Path(args.data_root),
+            split=args.split,
+            batch_size=args.batch_size,
+            single_h=args.single_h,
+            single_w=args.single_w,
+            max_iters=args.max_iters,
+            reduce_iters=tuple(reduce_iters),
+            learning_rate=args.lr,
+            num_workers=args.num_workers,
+            out_dir=args.out_dir,
+            checkpoint_dir=args.checkpoint_dir,
+            seed=args.seed,
+            device=device,
+        ),
+        args.out_dir,
+    )
 
     scaler = GradScaler(enabled=(device == "cuda"))
 
@@ -247,7 +262,7 @@ def main() -> None:
         )
 
         writer.add_scalar("train/loss_epoch", avg_train_loss, epoch)
-        writer.add_scalar("val/loss_epoch", val_loss_norm, epoch)          #val loss
+        writer.add_scalar("val/loss_epoch", val_loss_norm, epoch)
         writer.add_scalar("val/overall_mae_mm", overall_mae, epoch)
         writer.add_scalar("val/accuracy_10mm", acc_10mm, epoch)
 
