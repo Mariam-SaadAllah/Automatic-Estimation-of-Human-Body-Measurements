@@ -247,10 +247,8 @@ def main() -> None:
             np.random.default_rng(args.seed).choice(val_samples, size=min(256, len(val_samples)), replace=False)
         )
 
-        # subject-wise mm metrics (as before)
         per_meas_mae, overall_mae, tp, acc_10mm = evaluate_subjectwise_model(model, val_subset, device)
 
-        # normalized validation loss (same scale as training loss)
         val_loss_norm = evaluate_val_loss_norm(
             model=model,
             sample_list=val_subset,
@@ -266,11 +264,14 @@ def main() -> None:
         writer.add_scalar("val/overall_mae_mm", overall_mae, epoch)
         writer.add_scalar("val/accuracy_10mm", acc_10mm, epoch)
 
+        # ✅ UPDATED PRINT LINE: old format + validation loss
         print(
-            f"Epoch {epoch+1}/{num_epochs}  Iter {iteration}  "
-            f"Train loss: {avg_train_loss:.6f}  "
-            f"Val loss: {val_loss_norm:.6f}  "
-            f"Val overall MAE (mm): {overall_mae:.3f}"
+            f"Epoch {epoch+1}/{num_epochs} Iter {iteration} "
+            f"Train loss: {avg_train_loss:.6f} "
+            f"Val loss: {val_loss_norm:.6f} "
+            f"Val MAE: {overall_mae:.3f} "
+            f"Acc@10mm: {acc_10mm:.2f}% "
+            f"TPs: {tp}"
         )
 
         # ======= PRINT 14 MEASUREMENTS EVERY 4 EPOCHS =======
@@ -280,7 +281,6 @@ def main() -> None:
                 print(f"  {name:>20s}: {mae:7.2f} mm")
             print()
 
-        # ======= SAVE CHECKPOINTS =======
         ckpt = {
             "epoch": epoch + 1,
             "iteration": iteration,
@@ -306,4 +306,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
