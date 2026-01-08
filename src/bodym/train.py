@@ -31,44 +31,8 @@ def reduce_lr_by_factor(opt: torch.optim.Optimizer, factor: float = 0.1) -> None
         pg["lr"] *= factor
 
 
-def evaluate_subjectwise_model(model: nn.Module, sample_list: list[dict], device: str):
-    model.eval()
-    maes_by_subject: dict[str, list[np.ndarray]] = {}
-
-    ymin = torch.from_numpy(Y_MIN_MM).to(device)
-    ymax = torch.from_numpy(Y_MAX_MM).to(device)
-    yrng = (ymax - ymin)
-
-    with torch.no_grad():
-        for s in sample_list:
-            ds = BodyMDataset([s])
-            loader = DataLoader(ds, batch_size=1, shuffle=False, num_workers=0)
-            for x, y, sid in loader:
-                x = x.to(device)
-                y = y.to(device)
-
-                pred = model(x)
-
-                pred_mm = (pred + 1) / 2 * yrng + ymin
-                y_mm = (y + 1) / 2 * yrng + ymin
-
-                err = torch.abs(pred_mm - y_mm).cpu().numpy()[0]
-                maes_by_subject.setdefault(sid[0], []).append(err)
-
-    subj_maes = np.array([np.mean(errors, axis=0) for errors in maes_by_subject.values()])
-    per_measurement_mae = subj_maes.mean(axis=0)
-    overall_mae = float(per_measurement_mae.mean())
-    tp = {
-        "TP50": float(np.quantile(subj_maes, q=0.50, axis=0).mean()),
-        "TP75": float(np.quantile(subj_maes, q=0.75, axis=0).mean()),
-        "TP90": float(np.quantile(subj_maes, q=0.90, axis=0).mean()),
-    }
-    accuracy_10mm = compute_accuracy_mm(subj_maes, threshold_mm=10.0)
-    return per_measurement_mae, overall_mae, tp, accuracy_10mm
-
-
-# compute validation loss in normalized space (same as training loss)
-def evaluate_val_loss_norm(
+# ✅ UPDATED: SAMPLE-WISE evaluation (no subject grouping at all)
+def evaluate_samplewise_model(
     model: nn.Module,
     sample_list: list[dict],
     device: str,
@@ -76,22 +40,51 @@ def evaluate_val_loss_norm(
     single_w: int,
     batch_size: int,
     num_workers: int,
-) -> float:
+):
     model.eval()
+
     ds = BodyMDataset(sample_list, single_h=single_h, single_w=single_w)
     loader = DataLoader(ds, batch_size=batch_size, shuffle=False, num_workers=num_workers)
 
+    ymin = torch.from_numpy(Y_MIN_MM).to(device)
+    ymax = torch.from_numpy(Y_MAX_MM).to(device)
+    yrng = (ymax - ymin)
+
     criterion = nn.L1Loss(reduction="mean")
     losses = []
+    all_errs = []
 
     with torch.no_grad():
-        for x, y, _ in loader:
+        for x, y, _ in loader:  # ignore sid
             x = x.to(device)
             y = y.to(device)
+
             pred = model(x)
+
+            # normalized val loss (same space as train)
             losses.append(float(criterion(pred, y).item()))
 
-    return float(np.mean(losses)) if len(losses) > 0 else float("nan")
+            # mm errors
+            pred_mm = (pred + 1) / 2 * yrng + ymin
+            y_mm = (y + 1) / 2 * yrng + ymin
+            err_mm = torch.abs(pred_mm - y_mm).cpu().numpy()  # (B,14)
+            all_errs.append(err_mm)
+
+    errs = np.concatenate(all_errs, axis=0)  # (N,14)
+
+    per_measurement_mae = errs.mean(axis=0)
+    overall_mae = float(per_measurement_mae.mean())
+
+    tp = {
+        "TP50": float(np.quantile(errs, q=0.50, axis=0).mean()),
+        "TP75": float(np.quantile(errs, q=0.75, axis=0).mean()),
+        "TP90": float(np.quantile(errs, q=0.90, axis=0).mean()),
+    }
+
+    accuracy_10mm = compute_accuracy_mm(errs, threshold_mm=10.0)
+    val_loss_norm = float(np.mean(losses)) if len(losses) > 0 else float("nan")
+
+    return per_measurement_mae, overall_mae, tp, accuracy_10mm, val_loss_norm
 
 
 def main() -> None:
@@ -247,9 +240,8 @@ def main() -> None:
             np.random.default_rng(args.seed).choice(val_samples, size=min(256, len(val_samples)), replace=False)
         )
 
-        per_meas_mae, overall_mae, tp, acc_10mm = evaluate_subjectwise_model(model, val_subset, device)
-
-        val_loss_norm = evaluate_val_loss_norm(
+        # ✅ UPDATED: sample-wise metrics + val loss (no subject grouping)
+        per_meas_mae, overall_mae, tp, acc_10mm, val_loss_norm = evaluate_samplewise_model(
             model=model,
             sample_list=val_subset,
             device=device,
@@ -264,7 +256,6 @@ def main() -> None:
         writer.add_scalar("val/overall_mae_mm", overall_mae, epoch)
         writer.add_scalar("val/accuracy_10mm", acc_10mm, epoch)
 
-        # ✅ UPDATED PRINT LINE: old format + validation loss
         print(
             f"Epoch {epoch+1}/{num_epochs} Iter {iteration} "
             f"Train loss: {avg_train_loss:.6f} "
