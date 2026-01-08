@@ -46,6 +46,7 @@ MEASUREMENT_COLS: list[str] = [
     "height",
 ]
 
+
 @dataclass
 class Sample:
     """Data class to hold information for one data sample (one subject/photo entry)."""
@@ -60,17 +61,25 @@ class Sample:
     y_cm: list[float]  # target measurements in cm
     y: list[float]     # (alias of y_cm for compatibility)
 
-def build_samples(split_dir: Path) -> list[dict[str, Any]]:
+
+def build_samples(split_dir: Path) -> Tuple[list[dict[str, Any]], float, float, float, float]:
     """
     Read dataset CSV files from the given split directory (e.g., train, testA, testB)
-    and build a list of sample dictionaries.
+    and build a list of sample dicts. Returns the list of samples and the min/max of
+    height and weight (for normalization reference).
     """
+    # Read CSV files containing measurements, subject-to-photo mapping, and height/weight/gender.
     measurements_df = pd.read_csv(split_dir / "measurements.csv")
     subject_map_df = pd.read_csv(split_dir / "subject_to_photo_map.csv")
     hwg_meta_df = pd.read_csv(split_dir / "hwg_metadata.csv")
 
+    # Directories containing silhouette images.
     mask_dir = split_dir / "mask"
     mask_left_dir = split_dir / "mask_left"
+
+    # Compute min and max for height and weight from metadata (for normalization).
+    h_min, h_max = hwg_meta_df["height_cm"].min(), hwg_meta_df["height_cm"].max()
+    w_min, w_max = hwg_meta_df["weight_kg"].min(), hwg_meta_df["weight_kg"].max()
 
     # Build dictionaries for quick lookup by subject_id.
     subj_to_hw = {row["subject_id"]: row for _, row in hwg_meta_df.iterrows()}
@@ -78,48 +87,44 @@ def build_samples(split_dir: Path) -> list[dict[str, Any]]:
 
     samples: list[dict[str, Any]] = []
 
-    # iterate through ALL rows (subject_id, photo_id)
+    # ✅ CHANGED ONLY THIS PART: iterate ALL rows (full dataset), do NOT collapse by subject
     for _, row in subject_map_df.iterrows():
-
         subj = row["subject_id"]
         pid = row["photo_id"]
 
-        # Load *all* matching silhouette files
-        frontal_list = sorted(mask_dir.glob(f"{pid}*.png"))
-        lateral_list = sorted(mask_left_dir.glob(f"{pid}*.png"))
-
-        if len(frontal_list) == 0 or len(lateral_list) == 0:
+        frontal_img_path = mask_dir / f"{pid}.png"
+        lateral_img_path = mask_left_dir / f"{pid}.png"
+        if not frontal_img_path.exists() or not lateral_img_path.exists():
             continue
-
-        num_pairs = min(len(frontal_list), len(lateral_list))
 
         hw = subj_to_hw.get(subj)
         meas_row = subj_to_measure.get(subj)
         if hw is None or meas_row is None:
             continue
 
+        # Raw height and weight.
         height_cm = float(hw["height_cm"])
         weight_kg = float(hw["weight_kg"])
 
+        # Normalize height and weight using precomputed BodyM training statistics
         height_norm = (height_cm - HEIGHT_MIN_CM) / (HEIGHT_MAX_CM - HEIGHT_MIN_CM)
         weight_norm = (weight_kg - WEIGHT_MIN_KG) / (WEIGHT_MAX_KG - WEIGHT_MIN_KG)
 
+        # Collect measurement targets in cm for this subject.
         y_cm = [float(meas_row[c]) for c in MEASUREMENT_COLS]
 
-        # create one sample per silhouette pair
-        for i in range(num_pairs):
-            samples.append({
-                "photo_id": f"{pid}_{i}",
-                "frontal": str(frontal_list[i]),
-                "lateral": str(lateral_list[i]),
-                "height": height_norm,
-                "weight": weight_norm,
-                "height_cm": height_cm,
-                "weight_kg": weight_kg,
-                "subject_id": subj,
-                "y_cm": y_cm,
-                "y": y_cm,
-            })
+        samples.append({
+            "photo_id": pid,
+            "frontal": str(frontal_img_path),
+            "lateral": str(lateral_img_path),
+            "height": height_norm,
+            "weight": weight_norm,
+            "height_cm": height_cm,
+            "weight_kg": weight_kg,
+            "subject_id": subj,
+            "y_cm": y_cm,
+            "y": y_cm,  # alias (the model will predict mm, see below)
+        })
 
     return samples
 
@@ -127,6 +132,11 @@ def build_samples(split_dir: Path) -> list[dict[str, Any]]:
 class BodyMDataset(Dataset):
     """
     PyTorch Dataset for BodyM silhouette data.
+    Each item returns:
+      - x: a tensor of shape (3, H, 2W) containing two silhouette images (frontal + lateral)
+           stacked side by side in one channel, and two extra channels for height and weight.
+      - y: a tensor of shape (14,) containing the 14 target measurements in millimeters.
+      - subject_id: the subject identifier.
     """
     def __init__(self, samples: list[dict[str, Any]], single_h: int = 640, single_w: int = 480, debug: bool = False):
         self.samples = samples
@@ -134,6 +144,7 @@ class BodyMDataset(Dataset):
         self.single_w = single_w
         self.debug = debug
 
+        # ImageNet mean and std for normalization (for 3 channels).
         self.imagenet_mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
         self.imagenet_std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
 
@@ -141,33 +152,45 @@ class BodyMDataset(Dataset):
         return len(self.samples)
 
     def _load_and_resize(self, path: str) -> np.ndarray:
-        img = Image.open(path).convert("L")
+        """Load an image in grayscale and resize to (single_h, single_w)."""
+        img = Image.open(path).convert("L")  # L mode for grayscale
         img = img.resize((self.single_w, self.single_h), resample=Image.NEAREST)
-        return np.array(img, dtype=np.float32) / 255.0
+        arr = np.array(img, dtype=np.float32) / 255.0  # scale pixel values to [0,1]
+        return arr
 
     def __getitem__(self, idx: int):
+        # Retrieve sample info
         s = self.samples[idx]
-
-        front_arr = self._load_and_resize(s["frontal"])
-        side_arr = self._load_and_resize(s["lateral"])
+        # Load and resize both frontal and lateral silhouette images.
+        front_arr = self._load_and_resize(s["frontal"])  # shape: (H, W)
+        side_arr = self._load_and_resize(s["lateral"])   # shape: (H, W)
+        # Concatenate images horizontally: result shape (H, 2W)
         concat_img = np.concatenate([front_arr, side_arr], axis=1).astype(np.float32)
 
+        # Create height and weight maps of same size as concat_img.
         height_map = np.full_like(concat_img, fill_value=s["height"], dtype=np.float32)
         weight_map = np.full_like(concat_img, fill_value=s["weight"], dtype=np.float32)
 
-        stacked = np.stack([concat_img, height_map, weight_map], axis=0)
+        # Stack the silhouette, height, and weight into 3 channels.
+        stacked = np.stack([concat_img, height_map, weight_map], axis=0)  # shape: (3, H, 2W)
 
+        # Normalize the 3-channel image using ImageNet statistics.
         stacked = (stacked - self.imagenet_mean[:, None, None]) / self.imagenet_std[:, None, None]
+
+        # Convert to torch.Tensor.
         x = torch.from_numpy(stacked).float()
 
-        # Prepare target measurements in millimeters
+        # Prepare target measurements in millimeters and normalize to [-1, +1]
         y_cm = np.array(s["y_cm"], dtype=np.float32)
         y_mm = y_cm * 10.0  # convert cm → mm
+        y_mm = np.clip(y_mm, Y_MIN_MM, Y_MAX_MM)  # clamp within BodyM range
 
-        # Normalize to [-1, +1]
+        # Normalize to [-1, +1] using BodyM training min/max
         y_norm = 2.0 * (y_mm - Y_MIN_MM) / (Y_MAX_MM - Y_MIN_MM) - 1.0
 
         y_tensor = torch.from_numpy(y_norm).float()
         subject_id = s["subject_id"]
         return x, y_tensor, subject_id
+
+
 
