@@ -8,13 +8,12 @@ import torch
 from torch.utils.data import DataLoader
 
 from bodym.data import BodyMDataset, build_samples
-from bodym.data import Y_MIN_MM, Y_MAX_MM, MEASUREMENT_COLS  # added MEASUREMENT_COLS
+from bodym.data import Y_MIN_MM, Y_MAX_MM, MEASUREMENT_COLS
 from bodym.model import MNASNetRegressor
 
 
-# ---------------------------------------------------------------------
-# NEW: Helper to compute accuracy percentage
-# ---------------------------------------------------------------------
+# Helper: accuracy percentage within a tolerance (mm)
+
 def compute_accuracy_mm(errors: np.ndarray, threshold_mm: float = 10.0) -> float:
     """
     Compute percentage of predictions within a given mm tolerance.
@@ -26,20 +25,28 @@ def compute_accuracy_mm(errors: np.ndarray, threshold_mm: float = 10.0) -> float
     """
     within = (errors <= threshold_mm).astype(np.float32)
     return 100.0 * within.mean()
-# ---------------------------------------------------------------------
 
+# Subject-wise evaluation (THIS is what your professor wants for TestA/TestB)
 
-def evaluate_subjectwise_mm(model: torch.nn.Module, samples: list[dict], device: str):
+def evaluate_subject(model: torch.nn.Module, samples: list[dict], device: str):
     """
-    Subject-wise evaluation using the same logic as training.
+    Subject-wise evaluation:
+      1) compute per-photo error (mm)
+      2) average per subject
+      3) average across subjects
+
     Returns:
         overall_mae (float)
-        tp (dict)
-        per_meas_mae (np.ndarray)
+        tp (dict) with TP50/TP75/TP90
+        per_meas_mae (np.ndarray shape (14,))
         acc_10mm (float)
     """
     model.eval()
     maes_by_subject: dict[str, list[np.ndarray]] = {}
+
+    # constants for undo normalization: [-1,1] -> mm
+    scale = torch.from_numpy(Y_MAX_MM - Y_MIN_MM).to(device)
+    offset = torch.from_numpy(Y_MIN_MM).to(device)
 
     with torch.no_grad():
         for s in samples:
@@ -52,75 +59,36 @@ def evaluate_subjectwise_mm(model: torch.nn.Module, samples: list[dict], device:
 
                 pred = model(x)
 
-                # Undo normalization: [-1,1] → mm
-                scale = torch.from_numpy(Y_MAX_MM - Y_MIN_MM).to(device)
-                offset = torch.from_numpy(Y_MIN_MM).to(device)
-
                 pred_mm = (pred + 1) / 2 * scale + offset
                 y_mm = (y + 1) / 2 * scale + offset
 
-                # absolute error vector (14,)
-                err = torch.abs(pred_mm - y_mm).cpu().numpy()[0]
+                err = torch.abs(pred_mm - y_mm).cpu().numpy()[0]  # (14,)
 
                 subj = sid[0]
                 maes_by_subject.setdefault(subj, []).append(err)
 
-    # Combine sample errors → average per subject
-    subj_maes = np.array([
-        np.mean(err_list, axis=0) for err_list in maes_by_subject.values()
-    ])  # shape (num_subjects, 14)
+    # Average per subject -> shape (num_subjects, 14)
+    subj_maes = np.array([np.mean(err_list, axis=0) for err_list in maes_by_subject.values()])
 
-    # Per-measurement MAE
+    # Per-measurement MAE and overall MAE
     per_meas_mae = subj_maes.mean(axis=0)
-
-    # Overall MAE
     overall_mae = float(per_meas_mae.mean())
 
-    # Correct TP metrics (same as training.py)
+    # TP metrics: measurement-wise quantile, then mean across 14 measurements
     tp = {
         "TP50": float(np.quantile(subj_maes, 0.50, axis=0).mean()),
         "TP75": float(np.quantile(subj_maes, 0.75, axis=0).mean()),
         "TP90": float(np.quantile(subj_maes, 0.90, axis=0).mean()),
     }
 
-    # Accuracy @ 10 mm
+    # Accuracy @ 10 mm (on subject-averaged errors)
     acc_10mm = compute_accuracy_mm(subj_maes, threshold_mm=10.0)
 
     return overall_mae, tp, per_meas_mae, acc_10mm
 
 
-def evaluate_table_mm(model: torch.nn.Module, dataloader: DataLoader):
-    """
-    Evaluate model on a dataloader (one full dataset) and compute overall TP50, TP75, TP90 
-    on a per-sample basis. (This treats each prediction independently, not grouped by subject.)
-    """
-    model.eval()
-    all_preds: list[np.ndarray] = []
-    all_targets: list[np.ndarray] = []
-    device = next(model.parameters()).device
-    with torch.no_grad():
-        for imgs, ys, _ in dataloader:
-            imgs = imgs.to(device)
-            ys = ys.to(device)
-            outputs = model(imgs)
-            # Unnormalize both outputs and targets to millimeters
-            pred_mm = (outputs + 1) / 2 * (torch.from_numpy(Y_MAX_MM).to(device) - torch.from_numpy(Y_MIN_MM).to(device)) + torch.from_numpy(Y_MIN_MM).to(device)
-            ys_mm = (ys + 1) / 2 * (torch.from_numpy(Y_MAX_MM).to(device) - torch.from_numpy(Y_MIN_MM).to(device)) + torch.from_numpy(Y_MIN_MM).to(device)
-
-            all_preds.append(pred_mm.cpu().numpy())
-            all_targets.append(ys_mm.cpu().numpy())
-    preds = np.concatenate(all_preds, axis=0)
-    targets = np.concatenate(all_targets, axis=0)
-    abs_errors = np.abs(preds - targets)  # shape: (N, 14)
-    # Compute distribution percentiles over all individual errors
-    TP50 = np.percentile(abs_errors, 50)
-    TP75 = np.percentile(abs_errors, 75)
-    TP90 = np.percentile(abs_errors, 90)
-    return {"TP50": TP50, "TP75": TP75, "TP90": TP90}
-
-
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Evaluate BodyM MNASNet model on test sets")
+    parser = argparse.ArgumentParser(description="Evaluate BodyM MNASNet model on test sets (subject-wise).")
     parser.add_argument("--data_root", type=Path, required=True, help="Root directory of dataset (containing testA and testB)")
     parser.add_argument("--checkpoint", type=Path, required=True, help="Path to model checkpoint (.pt or .pth file)")
     parser.add_argument("--batch_size", type=int, default=22)
@@ -133,10 +101,9 @@ def main() -> None:
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     # Initialize model and load weights
-    model = MNASNetRegressor(num_outputs=14)
-    model = model.to(device)
+    model = MNASNetRegressor(num_outputs=14).to(device)
     checkpoint = torch.load(args.checkpoint, map_location=device)
-    if "model_state_dict" in checkpoint:
+    if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
         model.load_state_dict(checkpoint["model_state_dict"])
     else:
         model.load_state_dict(checkpoint)
@@ -145,35 +112,23 @@ def main() -> None:
     testA_samples = build_samples(Path(args.data_root) / args.splitA)
     testB_samples = build_samples(Path(args.data_root) / args.splitB)
 
-    # --- SUBJECT-WISE EVALUATION ---
-    overallA_mm, tpA, perA, accA = evaluate_subjectwise_mm(model, testA_samples, device)
-    overallB_mm, tpB, perB, accB = evaluate_subjectwise_mm(model, testB_samples, device)
+    # --- SUBJECT-WISE EVALUATION (required) ---
+    overallA_mm, tpA, perA, accA = evaluate_subject(model, testA_samples, device)
+    overallB_mm, tpB, perB, accB = evaluate_subject(model, testB_samples, device)
+
     print(f"TestA  | Overall MAE (mm): {overallA_mm:.3f}  Accuracy@10mm: {accA:.2f}%  TPs: {tpA}")
     print(f"TestB  | Overall MAE (mm): {overallB_mm:.3f}  Accuracy@10mm: {accB:.2f}%  TPs: {tpB}")
 
-    # --- Per-measurement MAE table ---
+    # --- Per-measurement MAE table (required) ---
     print("\nPer-measurement MAE (mm):")
     print(f"{'Measurement':>20s} | {'TestA':>10s} | {'TestB':>10s}")
     print("-" * 45)
     for n, a, b in zip(MEASUREMENT_COLS, perA, perB):
         print(f"{n:>20s} | {a:10.2f} | {b:10.2f}")
 
-    # --- BATCHED DATA EVALUATION (TP DISTRIBUTIONS) ---
-    testA_loader = DataLoader(BodyMDataset(testA_samples, single_h=args.single_h, single_w=args.single_w),
-                              batch_size=args.batch_size, shuffle=False, num_workers=2)
-    testB_loader = DataLoader(BodyMDataset(testB_samples, single_h=args.single_h, single_w=args.single_w),
-                              batch_size=args.batch_size, shuffle=False, num_workers=2)
-    metrics_testA = evaluate_table_mm(model, testA_loader)
-    metrics_testB = evaluate_table_mm(model, testB_loader)
-
-    print("\nBodyM Multi-View Evaluation Results (mm):")
-    print({
-        "TP90": [metrics_testA["TP90"], metrics_testB["TP90"]],
-        "TP75": [metrics_testA["TP75"], metrics_testB["TP75"]],
-        "TP50": [metrics_testA["TP50"], metrics_testB["TP50"]],
-    })
-
 
 if __name__ == "__main__":
     main()
+
+
 
