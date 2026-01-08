@@ -67,6 +67,33 @@ def evaluate_subjectwise_model(model: nn.Module, sample_list: list[dict], device
     return per_measurement_mae, overall_mae, tp, accuracy_10mm
 
 
+# ✅ NEW: compute validation loss in normalized space (same as training loss)
+def evaluate_val_loss_norm(
+    model: nn.Module,
+    sample_list: list[dict],
+    device: str,
+    single_h: int,
+    single_w: int,
+    batch_size: int,
+    num_workers: int,
+) -> float:
+    model.eval()
+    ds = BodyMDataset(sample_list, single_h=single_h, single_w=single_w)
+    loader = DataLoader(ds, batch_size=batch_size, shuffle=False, num_workers=num_workers)
+
+    criterion = nn.L1Loss(reduction="mean")
+    losses = []
+
+    with torch.no_grad():
+        for x, y, _ in loader:
+            x = x.to(device)
+            y = y.to(device)
+            pred = model(x)
+            losses.append(float(criterion(pred, y).item()))
+
+    return float(np.mean(losses)) if len(losses) > 0 else float("nan")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train BodyM MNASNet Regressor model.")
     parser.add_argument("--data_root", type=Path, required=True)
@@ -205,15 +232,29 @@ def main() -> None:
             np.random.default_rng(args.seed).choice(val_samples, size=min(256, len(val_samples)), replace=False)
         )
 
+        # subject-wise mm metrics (as before)
         per_meas_mae, overall_mae, tp, acc_10mm = evaluate_subjectwise_model(model, val_subset, device)
 
+        # normalized validation loss (same scale as training loss)
+        val_loss_norm = evaluate_val_loss_norm(
+            model=model,
+            sample_list=val_subset,
+            device=device,
+            single_h=args.single_h,
+            single_w=args.single_w,
+            batch_size=args.batch_size,
+            num_workers=args.num_workers,
+        )
+
         writer.add_scalar("train/loss_epoch", avg_train_loss, epoch)
+        writer.add_scalar("val/loss_epoch", val_loss_norm, epoch)          #val loss
         writer.add_scalar("val/overall_mae_mm", overall_mae, epoch)
         writer.add_scalar("val/accuracy_10mm", acc_10mm, epoch)
 
         print(
             f"Epoch {epoch+1}/{num_epochs}  Iter {iteration}  "
             f"Train loss: {avg_train_loss:.6f}  "
+            f"Val loss: {val_loss_norm:.6f}  "
             f"Val overall MAE (mm): {overall_mae:.3f}"
         )
 
@@ -250,3 +291,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
