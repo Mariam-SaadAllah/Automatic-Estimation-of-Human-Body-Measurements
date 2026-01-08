@@ -62,7 +62,8 @@ class Sample:
     y: list[float]     # (alias of y_cm for compatibility)
 
 
-def build_samples(split_dir: Path) -> Tuple[list[dict[str, Any]], float, float, float, float]:
+def build_samples(split_dir: Path) -> list[dict[str, Any]]:
+
     """
     Read dataset CSV files from the given split directory (e.g., train, testA, testB)
     and build a list of sample dicts. Returns the list of samples and the min/max of
@@ -191,6 +192,7 @@ class BodyMDataset(Dataset):
         y_tensor = torch.from_numpy(y_norm).float()
         subject_id = s["subject_id"]
         return x, y_tensor, subject_id
+
 
 
 
