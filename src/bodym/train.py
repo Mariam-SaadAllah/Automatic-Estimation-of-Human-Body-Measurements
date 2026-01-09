@@ -31,7 +31,7 @@ def reduce_lr_by_factor(opt: torch.optim.Optimizer, factor: float = 0.1) -> None
         pg["lr"] *= factor
 
 
-# ✅ UPDATED: SAMPLE-WISE evaluation (no subject grouping at all)
+# ✅ SAMPLE-WISE evaluation (no subject grouping at all)
 def evaluate_samplewise_model(
     model: nn.Module,
     sample_list: list[dict],
@@ -104,7 +104,9 @@ def main() -> None:
     parser.add_argument("--out_dir", type=Path, default=DEFAULT_OUT_DIR)
     parser.add_argument("--checkpoint_dir", type=Path, default=DEFAULT_CKPT_DIR)
 
+    # ✅ seed stays 42
     parser.add_argument("--seed", type=int, default=42)
+
     parser.add_argument(
         "--weights",
         type=str,
@@ -236,11 +238,9 @@ def main() -> None:
 
         avg_train_loss = running_loss / max(1, batch_count)
 
-        val_subset = val_samples if len(val_samples) <= 1000 else list(
-            np.random.default_rng(args.seed).choice(val_samples, size=min(256, len(val_samples)), replace=False)
-        )
+        # ✅ CHANGE REQUESTED: always evaluate on the FULL 10% validation set (no random subset)
+        val_subset = val_samples
 
-        # ✅ UPDATED: sample-wise metrics + val loss (no subject grouping)
         per_meas_mae, overall_mae, tp, acc_10mm, val_loss_norm = evaluate_samplewise_model(
             model=model,
             sample_list=val_subset,
@@ -297,3 +297,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
